@@ -1,0 +1,121 @@
+{
+  "template_name": "J0 Prospect - Premier Contact ePerformance",
+  "version": "1.0",
+  "created_at": "2026-09-10",
+  "description": "Template de premier contact (J0) optimisé pour convertir les nouveaux prospects en conversations WhatsApp qualifiées",
+  
+  "variables_brevo": {
+    "prenom": "Prénom du prospect (ex: Jean)",
+    "nom": "Nom complet du prospect (ex: Jean Kouadio)",
+    "email": "Email du prospect",
+    "source": "Source du prospect (ex: LinkedIn, Facebook, Scraping)",
+    "entreprise": "Nom de l'entreprise du prospect (optionnel)"
+  },
+  
+  "objets_email": {
+    "variante_a": {
+      "objet": "{{prenom}}, une surprise pour votre stratégie marketing 🎁",
+      "description": "Approche personnalisée + curiosité + émoji cadeau",
+      "cible_ouverture": "40%"
+    },
+    "variante_b": {
+      "objet": "Diagnostic marketing IA offert — Places limitées",
+      "description": "Valeur directe + urgence + exclusivité",
+      "cible_ouverture": "38%"
+    },
+    "variante_c": {
+      "objet": "{{prenom}}, 29 agents IA pour booster votre business",
+      "description": "Personnalisation + preuve sociale (29 agents) + bénéfice",
+      "cible_ouverture": "35%"
+    }
+  },
+  
+  "cta_buttons": {
+    "principal": {
+      "texte": "💬 Continuer sur WhatsApp",
+      "url": "https://wa.me/2250151170666?text=Bonjour%20St%C3%A9phane%2C%20je%20viens%20de%20recevoir%20votre%20email%20ePerformance.%20J%27aimerais%20en%20savoir%20plus%20sur%20le%20diagnostic%20gratuit%20%F0%9F%91%8B",
+      "couleur": "#25D366",
+      "couleur_hover": "#1fa855",
+      "priorite": 1
+    },
+    "secondaire": {
+      "texte": "🎯 Réserver mon diagnostic gratuit",
+      "url": "https://wa.me/2250151170666?text=Bonjour%2C%20je%20souhaite%20r%C3%A9server%20mon%20diagnostic%20marketing%20gratuit%20%F0%9F%9A%80",
+      "couleur": "#c9a96e",
+      "couleur_hover": "#b8986d",
+      "priorite": 2
+    }
+  },
+  
+  "branding": {
+    "couleur_signature": "#c9a96e",
+    "couleur_fond_dark": "#0A0B0F",
+    "couleur_texte_light": "#E8E5DE",
+    "couleur_accent_or": "#E8D09A",
+    "police_principale": "DM Sans, -apple-system, BlinkMacSystemFont, sans-serif",
+    "police_titres": "Outfit, -apple-system, BlinkMacSystemFont, sans-serif"
+  },
+  
+  "contact": {
+    "whatsapp": "+225 01 51 17 06 66",
+    "email": "contact@eperformance.pro",
+    "site_web": "https://eperformance.pro",
+    "nom_expediteur": "Stéphane - ePerformance"
+  },
+  
+  "tags_brevo": [
+    "j0_prospect",
+    "first_contact",
+    "diagnostic_gratuit",
+    "whatsapp_redirect"
+  ],
+  
+  "kpis_cibles": {
+    "taux_ouverture": "35%+",
+    "taux_clic_whatsapp": "15%+",
+    "taux_reservation_diagnostic": "10%+",
+    "taux_reponse_email_directe": "0% (redirection WhatsApp uniquement)"
+  },
+  
+  "psychologie_prospect": {
+    "profil": "Ne connaît pas encore ePerformance, potentiellement ajouté via scraping",
+    "besoins": [
+      "Réassurance rapide",
+      "Solutions concrètes pour son business",
+      "Valeur gratuite avant achat (diagnostic = pont)"
+    ],
+    "triggers": [
+      "FOMO (places limitées)",
+      "Social proof (29 agents IA)",
+      "Autorité (expertise marketing)",
+      "Gratuit (diagnostic offert)"
+    ]
+  },
+  
+  "best_practices": {
+    "faire": [
+      "Rediriger vers WhatsApp (+225 01 51 17 06 66)",
+      "Proposer diagnostic gratuit immédiatement",
+      "Ton chaleureux, professionnel, moderne",
+      "Créer urgence douce (places limitées)",
+      "Boutons CTA visibles et cliquables",
+      "Mobile-first (70% ouvrent sur mobile)"
+    ],
+    "ne_pas_faire": [
+      "Demander de répondre par email",
+      "Être trop long (max 200 mots corps email)",
+      "Trop de CTA (max 2)",
+      "Jargon technique",
+      "Ton trop corporate ou trop casual"
+    ]
+  },
+  
+  "notes_technique": {
+    "format_html": "Responsive mobile-first, compatibilité email clients",
+    "format_texte": "Fallback plain text pour clients email anciens",
+    "variables_obligatoires": ["prenom", "email"],
+    "variables_optionnelles": ["nom", "entreprise", "source"],
+    "tracking": "Ouverture et clics trackés via Brevo",
+    "bcc_admin": "ballo@eperformance.pro (automatique)"
+  }
+}

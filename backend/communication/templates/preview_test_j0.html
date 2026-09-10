@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Bienvenue chez ePerformance</title>
+    <!--[if mso]>
+    <style type="text/css">
+        body, table, td {font-family: Arial, sans-serif !important;}
+    </style>
+    <![endif]-->
+    <style>
+        /* Reset et base */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; 
+            background-color: #f4f4f4;
+            color: #333333;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        /* Container principal */
+        .email-wrapper {
+            width: 100%;
+            background-color: #f4f4f4;
+            padding: 20px 0;
+        }
+        
+        .email-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* Header avec branding */
+        .header {
+            background: linear-gradient(135deg, #0A0B0F 0%, #1a1b1f 100%);
+            padding: 30px 20px;
+            text-align: center;
+            border-bottom: 3px solid #c9a96e;
+        }
+        
+        .logo-text {
+            font-family: 'Outfit', -apple-system, sans-serif;
+            font-size: 28px;
+            font-weight: 900;
+            color: #ffffff;
+            letter-spacing: -0.5px;
+        }
+        
+        .logo-accent {
+            background: linear-gradient(135deg, #c9a96e, #E8D09A);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .tagline {
+            color: #E8E5DE;
+            font-size: 13px;
+            margin-top: 8px;
+            opacity: 0.9;
+        }
+        
+        /* Corps du message */
+        .content {
+            padding: 35px 30px;
+        }
+        
+        .greeting {
+            font-size: 18px;
+            font-weight: 700;
+            color: #0A0B0F;
+            margin-bottom: 20px;
+        }
+        
+        .greeting-name {
+            color: #c9a96e;
+        }
+        
+        .intro {
+            font-size: 15px;
+            color: #333333;
+            line-height: 1.7;
+            margin-bottom: 25px;
+        }
+        
+        /* Badge diagnostic gratuit */
+        .offer-badge {
+            background: linear-gradient(135deg, #c9a96e 0%, #E8D09A 100%);
+            color: #0A0B0F;
+            padding: 15px 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin: 25px 0;
+            font-weight: 700;
+            font-size: 16px;
+            box-shadow: 0 4px 10px rgba(201, 169, 110, 0.3);
+        }
+        
+        .offer-badge-icon {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+        
+        /* Bénéfices */
+        .benefits {
+            margin: 25px 0;
+        }
+        
+        .benefit-item {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 15px;
+            padding: 12px;
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            border-left: 3px solid #c9a96e;
+        }
+        
+        .benefit-icon {
+            font-size: 20px;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+        
+        .benefit-text {
+            font-size: 14px;
+            color: #333333;
+            line-height: 1.5;
+        }
+        
+        /* Boutons CTA */
+        .cta-section {
+            text-align: center;
+            margin: 30px 0 25px;
+        }
+        
+        .cta-primary {
+            display: inline-block;
+            background-color: #25D366;
+            color: #ffffff !important;
+            text-decoration: none;
+            padding: 16px 35px;
+            border-radius: 10px;
+            font-weight: 700;
+            font-size: 16px;
+            margin: 10px 0;
+            box-shadow: 0 4px 12px rgba(37, 211, 102, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .cta-primary:hover {
+            background-color: #1fa855;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(37, 211, 102, 0.4);
+        }
+        
+        .cta-secondary {
+            display: inline-block;
+            background-color: #c9a96e;
+            color: #ffffff !important;
+            text-decoration: none;
+            padding: 14px 30px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 15px;
+            margin: 10px 0;
+            box-shadow: 0 4px 12px rgba(201, 169, 110, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .cta-secondary:hover {
+            background-color: #b8986d;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(201, 169, 110, 0.4);
+        }
+        
+        /* Urgence douce */
+        .urgency {
+            text-align: center;
+            font-size: 13px;
+            color: #d9534f;
+            font-style: italic;
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #fff5f5;
+            border-radius: 6px;
+        }
+        
+        /* Social proof */
+        .social-proof {
+            text-align: center;
+            margin: 25px 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #f9f9f9 0%, #ffffff 100%);
+            border-radius: 10px;
+            border: 1px solid #e8e8e8;
+        }
+        
+        .social-proof-number {
+            font-size: 36px;
+            font-weight: 900;
+            color: #c9a96e;
+            font-family: 'Outfit', sans-serif;
+        }
+        
+        .social-proof-text {
+            font-size: 14px;
+            color: #666666;
+            margin-top: 8px;
+        }
+        
+        /* Footer */
+        .footer {
+            background-color: #f9f9f9;
+            padding: 25px 30px;
+            text-align: center;
+            border-top: 1px solid #e8e8e8;
+        }
+        
+        .footer-contact {
+            margin-bottom: 15px;
+        }
+        
+        .footer-link {
+            color: #c9a96e;
+            text-decoration: none;
+            font-size: 14px;
+            margin: 0 10px;
+            font-weight: 600;
+        }
+        
+        .footer-link:hover {
+            text-decoration: underline;
+        }
+        
+        .footer-note {
+            font-size: 12px;
+            color: #999999;
+            margin-top: 15px;
+            line-height: 1.5;
+        }
+        
+        .footer-signature {
+            margin-top: 20px;
+            font-size: 13px;
+            color: #666666;
+            font-style: italic;
+        }
+        
+        /* Responsive mobile */
+        @media only screen and (max-width: 600px) {
+            .email-container { border-radius: 0; }
+            .content { padding: 25px 20px; }
+            .header { padding: 25px 15px; }
+            .logo-text { font-size: 24px; }
+            .greeting { font-size: 16px; }
+            .intro { font-size: 14px; }
+            .cta-primary, .cta-secondary { 
+                width: 100%; 
+                padding: 16px 20px; 
+                font-size: 15px;
+                display: block;
+            }
+            .benefit-item { padding: 10px; }
+            .social-proof-number { font-size: 30px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-wrapper">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f4f4f4;">
+            <tr>
+                <td align="center" style="padding: 20px 0;">
+                    <table class="email-container" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px; background-color: #ffffff; border-radius: 12px; overflow: hidden;">
+                        
+                        <!-- Header -->
+                        <tr>
+                            <td class="header" style="background: linear-gradient(135deg, #0A0B0F 0%, #1a1b1f 100%); padding: 30px 20px; text-align: center; border-bottom: 3px solid #c9a96e;">
+                                <h1 class="logo-text" style="font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 900; color: #ffffff; margin: 0;">
+                                    e<span class="logo-accent" style="background: linear-gradient(135deg, #c9a96e, #E8D09A); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Performance</span>
+                                </h1>
+                                <p class="tagline" style="color: #E8E5DE; font-size: 13px; margin-top: 8px;">Plateforme IA Marketing Avancée</p>
+                            </td>
+                        </tr>
+                        
+                        <!-- Content -->
+                        <tr>
+                            <td class="content" style="padding: 35px 30px;">
+                                
+                                <!-- Greeting personnalisé -->
+                                <p class="greeting" style="font-size: 18px; font-weight: 700; color: #0A0B0F; margin-bottom: 20px;">
+                                    Bonjour <span class="greeting-name" style="color: #c9a96e;">Jean</span> 👋
+                                </p>
+                                
+                                <!-- Introduction -->
+                                <p class="intro" style="font-size: 15px; color: #333333; line-height: 1.7; margin-bottom: 25px;">
+                                    Je m'appelle <strong>Stéphane</strong> et je dirige ePerformance, une plateforme qui révolutionne le marketing digital grâce à <strong>29 agents IA spécialisés</strong>.
+                                </p>
+                                
+                                <p class="intro" style="font-size: 15px; color: #333333; line-height: 1.7; margin-bottom: 25px;">
+                                    J'ai une surprise pour vous : un <strong>diagnostic marketing gratuit</strong> personnalisé qui révèle les opportunités cachées de votre business 🎯
+                                </p>
+                                
+                                <!-- Offer Badge -->
+                                <div class="offer-badge" style="background: linear-gradient(135deg, #c9a96e 0%, #E8D09A 100%); color: #0A0B0F; padding: 15px 20px; border-radius: 10px; text-align: center; margin: 25px 0; font-weight: 700; font-size: 16px;">
+                                    <div class="offer-badge-icon" style="font-size: 24px; margin-bottom: 5px;">🎁</div>
+                                    DIAGNOSTIC MARKETING GRATUIT
+                                    <div style="font-size: 13px; font-weight: 400; margin-top: 5px; opacity: 0.9;">Valeur réelle : 150€ • Offert aujourd'hui</div>
+                                </div>
+                                
+                                <!-- Bénéfices -->
+                                <div class="benefits" style="margin: 25px 0;">
+                                    <div class="benefit-item" style="display: flex; align-items: flex-start; margin-bottom: 15px; padding: 12px; background-color: #f9f9f9; border-radius: 8px; border-left: 3px solid #c9a96e;">
+                                        <span class="benefit-icon" style="font-size: 20px; margin-right: 12px;">✅</span>
+                                        <span class="benefit-text" style="font-size: 14px; color: #333333; line-height: 1.5;">
+                                            <strong>Analyse approfondie</strong> de vos canaux marketing actuels
+                                        </span>
+                                    </div>
+                                    
+                                    <div class="benefit-item" style="display: flex; align-items: flex-start; margin-bottom: 15px; padding: 12px; background-color: #f9f9f9; border-radius: 8px; border-left: 3px solid #c9a96e;">
+                                        <span class="benefit-icon" style="font-size: 20px; margin-right: 12px;">🚀</span>
+                                        <span class="benefit-text" style="font-size: 14px; color: #333333; line-height: 1.5;">
+                                            <strong>Opportunités d'automatisation IA</strong> pour économiser 10h/semaine
+                                        </span>
+                                    </div>
+                                    
+                                    <div class="benefit-item" style="display: flex; align-items: flex-start; margin-bottom: 15px; padding: 12px; background-color: #f9f9f9; border-radius: 8px; border-left: 3px solid #c9a96e;">
+                                        <span class="benefit-icon" style="font-size: 20px; margin-right: 12px;">💡</span>
+                                        <span class="benefit-text" style="font-size: 14px; color: #333333; line-height: 1.5;">
+                                            <strong>Plan d'action concret</strong> pour doubler votre ROI marketing
+                                        </span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Social Proof -->
+                                <div class="social-proof" style="text-align: center; margin: 25px 0; padding: 20px; background: linear-gradient(135deg, #f9f9f9 0%, #ffffff 100%); border-radius: 10px; border: 1px solid #e8e8e8;">
+                                    <div class="social-proof-number" style="font-size: 36px; font-weight: 900; color: #c9a96e; font-family: 'Outfit', sans-serif;">29</div>
+                                    <div class="social-proof-text" style="font-size: 14px; color: #666666; margin-top: 8px;">
+                                        Agents IA spécialisés travaillent pour votre succès
+                                    </div>
+                                </div>
+                                
+                                <!-- CTA Section -->
+                                <div class="cta-section" style="text-align: center; margin: 30px 0 25px;">
+                                    <a href="https://wa.me/2250151170666?text=Bonjour%20St%C3%A9phane%2C%20je%20viens%20de%20recevoir%20votre%20email%20ePerformance.%20J%27aimerais%20en%20savoir%20plus%20sur%20le%20diagnostic%20gratuit%20%F0%9F%91%8B" class="cta-primary" style="display: inline-block; background-color: #25D366; color: #ffffff; text-decoration: none; padding: 16px 35px; border-radius: 10px; font-weight: 700; font-size: 16px; margin: 10px 0;">
+                                        💬 Continuer sur WhatsApp
+                                    </a>
+                                    
+                                    <br>
+                                    
+                                    <a href="https://wa.me/2250151170666?text=Bonjour%2C%20je%20souhaite%20r%C3%A9server%20mon%20diagnostic%20marketing%20gratuit%20%F0%9F%9A%80" class="cta-secondary" style="display: inline-block; background-color: #c9a96e; color: #ffffff; text-decoration: none; padding: 14px 30px; border-radius: 10px; font-weight: 600; font-size: 15px; margin: 10px 0;">
+                                        🎯 Réserver mon diagnostic gratuit
+                                    </a>
+                                </div>
+                                
+                                <!-- Urgence douce -->
+                                <div class="urgency" style="text-align: center; font-size: 13px; color: #d9534f; font-style: italic; margin-top: 15px; padding: 10px; background-color: #fff5f5; border-radius: 6px;">
+                                    ⏰ Places limitées : seulement 5 diagnostics gratuits par semaine
+                                </div>
+                                
+                                <!-- Note importante -->
+                                <p style="font-size: 13px; color: #999999; text-align: center; margin-top: 25px; line-height: 1.6;">
+                                    <strong>Note :</strong> Pour une réponse rapide, contactez-moi directement sur WhatsApp.<br>
+                                    Cet email ne reçoit pas de réponses (notifications uniquement).
+                                </p>
+                                
+                            </td>
+                        </tr>
+                        
+                        <!-- Footer -->
+                        <tr>
+                            <td class="footer" style="background-color: #f9f9f9; padding: 25px 30px; text-align: center; border-top: 1px solid #e8e8e8;">
+                                <div class="footer-contact" style="margin-bottom: 15px;">
+                                    <a href="https://wa.me/2250151170666" class="footer-link" style="color: #c9a96e; text-decoration: none; font-size: 14px; margin: 0 10px; font-weight: 600;">
+                                        📱 WhatsApp
+                                    </a>
+                                    <a href="https://eperformance.pro" class="footer-link" style="color: #c9a96e; text-decoration: none; font-size: 14px; margin: 0 10px; font-weight: 600;">
+                                        🌐 Site Web
+                                    </a>
+                                    <a href="mailto:contact@eperformance.pro" class="footer-link" style="color: #c9a96e; text-decoration: none; font-size: 14px; margin: 0 10px; font-weight: 600;">
+                                        ✉️ Email
+                                    </a>
+                                </div>
+                                
+                                <p class="footer-note" style="font-size: 12px; color: #999999; margin-top: 15px; line-height: 1.5;">
+                                    ePerformance • Plateforme IA Marketing Avancée<br>
+                                    WhatsApp: +225 01 51 17 06 66<br>
+                                    Email: contact@eperformance.pro<br>
+                                    Web: <a href="https://eperformance.pro" style="color: #c9a96e; text-decoration: none;">eperformance.pro</a>
+                                </p>
+                                
+                                <p class="footer-signature" style="margin-top: 20px; font-size: 13px; color: #666666; font-style: italic;">
+                                    À très bientôt sur WhatsApp ! 🚀<br>
+                                    <strong>Stéphane</strong> • Fondateur ePerformance
+                                </p>
+                                
+                                <p style="font-size: 11px; color: #cccccc; margin-top: 20px;">
+                                    Vous recevez cet email car votre profil correspond à nos critères de prospection.<br>
+                                    Pour ne plus recevoir nos communications, <a href="#unsubscribe" style="color: #c9a96e; text-decoration: underline;">cliquez ici</a>.
+                                </p>
+                            </td>
+                        </tr>
+                        
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </div>
+</body>
+</html>
