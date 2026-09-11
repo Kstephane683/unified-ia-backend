@@ -123,7 +123,7 @@ class ContextBuilder:
                     SELECT site_name, system_prompt, welcome_message, 
                            features_enabled, theme_config, is_active
                     FROM chatbot_sites
-                    WHERE site_id = :site_id AND is_active = 1
+                    WHERE site_id = :site_id AND is_active = true
                     LIMIT 1
                 """),
                 {'site_id': site_id}
@@ -228,59 +228,15 @@ class ContextBuilder:
         """
         Charger les diagnostics précédents (soit par user_id, soit par conversation)
         
+        NOTE: Table 'diagnostics' existe dans MySQL legacy, pas encore dans PostgreSQL Railway
+        Retourne None sans erreur (à migrer ultérieurement)
+        
         Returns:
             Liste de diagnostics ou None
         """
         try:
-            # Stratégie : charger les 3 derniers diagnostics (max 90 jours)
-            ninety_days_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
-            
-            query_params = {'date_limit': ninety_days_ago}
-            
-            if user_id:
-                # Si user connecté, charger ses diagnostics
-                query = """
-                    SELECT id, cac, ltv, ratio_ltv_cac, budget_pub_mois, 
-                           nombre_clients, score_global, created_at
-                    FROM diagnostics
-                    WHERE candidat_id = :user_id 
-                    AND created_at >= :date_limit
-                    ORDER BY created_at DESC
-                    LIMIT 3
-                """
-                query_params['user_id'] = user_id
-            else:
-                # Sinon, essayer de trouver via la conversation (si lead capturé)
-                query = """
-                    SELECT d.id, d.cac, d.ltv, d.ratio_ltv_cac, d.budget_pub_mois,
-                           d.nombre_clients, d.score_global, d.created_at
-                    FROM diagnostics d
-                    INNER JOIN chatbot_leads l ON l.email = d.email
-                    WHERE l.conversation_id = :conversation_id
-                    AND d.created_at >= :date_limit
-                    ORDER BY d.created_at DESC
-                    LIMIT 3
-                """
-                query_params['conversation_id'] = conversation_id
-            
-            results = self.db.execute(text(query), query_params).fetchall()
-            
-            if results:
-                diagnostics = []
-                for row in results:
-                    diagnostics.append({
-                        'id': row[0],
-                        'cac': float(row[1]) if row[1] else None,
-                        'ltv': float(row[2]) if row[2] else None,
-                        'ltv_cac_ratio': float(row[3]) if row[3] else None,
-                        'total_budget': float(row[4]) if row[4] else None,
-                        'client_count': row[5],
-                        'global_score': row[6],
-                        'created_at': row[7].isoformat() if row[7] else None
-                    })
-                
-                return diagnostics
-            
+            # TODO: Migrer table diagnostics de MySQL vers PostgreSQL
+            # Pour l'instant, retourner None silencieusement
             return None
         
         except Exception as e:
@@ -298,11 +254,11 @@ class ContextBuilder:
         try:
             result = self.db.execute(
                 text("""
-                    SELECT visitor_name, visitor_email, visitor_phone, 
-                           conversation_transcript, captured_at
+                    SELECT name, email, phone, 
+                           message, created_at
                     FROM chatbot_leads
                     WHERE conversation_id = :conversation_id
-                    ORDER BY captured_at DESC
+                    ORDER BY created_at DESC
                     LIMIT 1
                 """),
                 {'conversation_id': conversation_id}
@@ -313,7 +269,7 @@ class ContextBuilder:
                     'name': result[0],
                     'email': result[1],
                     'phone': result[2],
-                    'transcript': result[3],
+                    'message': result[3],
                     'captured_at': result[4].isoformat() if result[4] else None
                 }
             
