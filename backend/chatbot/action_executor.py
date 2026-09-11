@@ -14,6 +14,7 @@ from typing import Dict, Optional, List, Any
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import re
+import os
 
 from .models import ChatbotLead, ChatbotConversation
 
@@ -48,9 +49,45 @@ class ActionExecutor:
             db: Session SQLAlchemy
         """
         self.db = db
-        # TODO: Configurer NotificationService avec les providers (email/whatsapp/telegram)
-        # Pour l'instant désactivé pour permettre au chatbot de fonctionner
-        self.notification_service = None  # NotificationService(db, email_config={...}, whatsapp_config={...})
+        
+        # Configuration NotificationService depuis variables d'environnement
+        if NotificationService:
+            email_config = {
+                'api_key': os.getenv('BREVO_API_KEY', ''),
+                'sender_email': os.getenv('BREVO_SENDER_EMAIL', 'notifications@eperformance.pro'),
+                'sender_name': os.getenv('BREVO_SENDER_NAME', 'ePerformance')
+            }
+            
+            whatsapp_config = {
+                'access_token': os.getenv('WHATSAPP_ACCESS_TOKEN', ''),
+                'phone_number_id': os.getenv('WHATSAPP_PHONE_NUMBER_ID', ''),
+                'business_phone': os.getenv('WHATSAPP_BUSINESS_PHONE', '')
+            }
+            
+            telegram_config = {
+                'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
+                'admin_chat_id': os.getenv('TELEGRAM_ADMIN_CHAT_ID', '')
+            }
+            
+            # Activer seulement si au moins une config est présente
+            if email_config['api_key'] or telegram_config['bot_token']:
+                try:
+                    self.notification_service = NotificationService(
+                        db=db,
+                        email_config=email_config,
+                        whatsapp_config=whatsapp_config,
+                        telegram_config=telegram_config
+                    )
+                    print("✅ NotificationService activé (Email, WhatsApp, Telegram)")
+                except Exception as e:
+                    print(f"⚠️  NotificationService init failed: {e}")
+                    self.notification_service = None
+            else:
+                print("⚠️  NotificationService désactivé (aucune clé API)")
+                self.notification_service = None
+        else:
+            print("⚠️  NotificationService module non disponible")
+            self.notification_service = None
     
     async def execute_actions(
         self,
