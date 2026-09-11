@@ -64,12 +64,11 @@ class ActionExecutor:
             }
             
             telegram_config = {
-                'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
-                'admin_chat_id': os.getenv('TELEGRAM_ADMIN_CHAT_ID', '')
+                'default_bot_token': os.getenv('TELEGRAM_BOT_TOKEN', '')
             }
             
             # Activer seulement si au moins une config est présente
-            if email_config['api_key'] or telegram_config['bot_token']:
+            if email_config['api_key'] or telegram_config['default_bot_token']:
                 try:
                     self.notification_service = NotificationService(
                         db=db,
