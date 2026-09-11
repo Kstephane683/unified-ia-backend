@@ -23,6 +23,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     # Fallback for local development (MySQL)
     DATABASE_URL = "mysql+pymysql://unified_dev:dev_password_2026@localhost/unified_ia_dev"
+else:
+    # Fix Railway PostgreSQL URL: postgresql:// -> postgresql+psycopg2://
+    if DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+    elif DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 
 # Engine configuration
 engine = create_engine(
