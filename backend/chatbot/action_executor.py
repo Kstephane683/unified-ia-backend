@@ -60,8 +60,7 @@ class ActionExecutor:
             
             whatsapp_config = {
                 'access_token': os.getenv('WHATSAPP_ACCESS_TOKEN', ''),
-                'phone_number_id': os.getenv('WHATSAPP_PHONE_NUMBER_ID', ''),
-                'business_phone': os.getenv('WHATSAPP_BUSINESS_PHONE', '')
+                'phone_number_id': os.getenv('WHATSAPP_PHONE_NUMBER_ID', '')
             }
             
             telegram_config = {
