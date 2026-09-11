@@ -130,13 +130,26 @@ class ContextBuilder:
             ).fetchone()
             
             if result:
+                # Parse JSON fields (peuvent être str ou dict selon PostgreSQL driver)
+                features = result[3]
+                if isinstance(features, str):
+                    features = json.loads(features) if features else {}
+                elif features is None:
+                    features = {}
+                
+                theme = result[4]
+                if isinstance(theme, str):
+                    theme = json.loads(theme) if theme else {}
+                elif theme is None:
+                    theme = {}
+                
                 return {
                     'site_id': site_id,
                     'site_name': result[0],
                     'system_prompt': result[1],
                     'welcome_message': result[2],
-                    'features_enabled': json.loads(result[3]) if result[3] else {},
-                    'theme_config': json.loads(result[4]) if result[4] else {}
+                    'features_enabled': features,
+                    'theme_config': theme
                 }
             
             return None
