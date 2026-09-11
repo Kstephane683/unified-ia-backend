@@ -142,6 +142,7 @@ class ContextBuilder:
             return None
         
         except Exception as e:
+            self.db.rollback()
             print(f"Error loading site config: {e}")
             return None
     
@@ -177,6 +178,7 @@ class ContextBuilder:
             return messages
         
         except Exception as e:
+            self.db.rollback()
             print(f"Error loading conversation history: {e}")
             return []
     
@@ -214,6 +216,7 @@ class ContextBuilder:
             return None
         
         except Exception as e:
+            self.db.rollback()
             print(f"Error loading user profile: {e}")
             return None
     
@@ -281,6 +284,7 @@ class ContextBuilder:
             return None
         
         except Exception as e:
+            self.db.rollback()
             print(f"Error loading diagnostics: {e}")
             return None
     
@@ -316,7 +320,9 @@ class ContextBuilder:
             return None
         
         except Exception as e:
+            self.db.rollback()
             print(f"Error loading conversation lead: {e}")
+            return None
             return None
     
     def format_context_for_llm(self, context: Dict) -> str:

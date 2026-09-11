@@ -133,6 +133,7 @@ class ActionExecutor:
                 })
             
             except Exception as e:
+                self.db.rollback()
                 print(f"❌ Error executing action {action_type}: {e}")
                 import traceback
                 traceback.print_exc()
@@ -241,6 +242,7 @@ class ActionExecutor:
             }
         
         except Exception as e:
+            self.db.rollback()
             print(f"❌ Lead capture failed: {e}")
             return {'success': False, 'error': str(e)}
     
@@ -394,6 +396,7 @@ _{lead.capture_message[:200]}_
             }
         
         except Exception as e:
+            self.db.rollback()
             print(f"❌ Diagnostic creation failed: {e}")
             return {'success': False, 'error': str(e)}
     
@@ -442,6 +445,7 @@ _{lead.capture_message[:200]}_
             }
         
         except Exception as e:
+            self.db.rollback()
             print(f"❌ Callback scheduling failed: {e}")
             return {'success': False, 'error': str(e)}
     
@@ -495,7 +499,9 @@ _{lead.capture_message[:200]}_
             }
         
         except Exception as e:
+            self.db.rollback()
             print(f"❌ Escalation failed: {e}")
+            return {'success': False, 'error': str(e)}
             return {'success': False, 'error': str(e)}
     
     async def _execute_send_resource(
@@ -529,6 +535,7 @@ _{lead.capture_message[:200]}_
             }
         
         except Exception as e:
+            self.db.rollback()
             print(f"❌ Send resource failed: {e}")
             return {'success': False, 'error': str(e)}
     
@@ -562,6 +569,7 @@ _{lead.capture_message[:200]}_
             }
         
         except Exception as e:
+            self.db.rollback()
             print(f"❌ Track conversion failed: {e}")
             return {'success': False, 'error': str(e)}
     

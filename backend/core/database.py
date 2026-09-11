@@ -53,16 +53,25 @@ Base = declarative_base()
 
 def get_db() -> Generator[Session, None, None]:
     """
-    FastAPI dependency for database sessions.
+    FastAPI dependency for database sessions with automatic transaction management.
     
     Usage:
         @app.get("/items")
         def read_items(db: Session = Depends(get_db)):
             return db.query(Item).all()
+    
+    Transaction management:
+    - Auto-commit on success
+    - Auto-rollback on exception (prevents InFailedSqlTransaction errors)
+    - Always closes session
     """
     db = SessionLocal()
     try:
         yield db
+        db.commit()  # Commit si aucune exception
+    except Exception:
+        db.rollback()  # Rollback automatique sur erreur
+        raise
     finally:
         db.close()
 

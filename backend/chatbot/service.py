@@ -230,26 +230,19 @@ class ChatbotService:
             }
         
         except Exception as e:
+            # ROLLBACK IMMÉDIAT pour éviter InFailedSqlTransaction
+            self.db.rollback()
+            
             # Log error et retourner une réponse d'erreur
             print(f"Error processing message: {e}")
             import traceback
             traceback.print_exc()
             
-            self._track_event(
-                site_id=site_id,
-                conversation_id=conversation_id or 'unknown',
-                event_type='error',
-                event_category='error',
-                event_data={
-                    'error': str(e),
-                    'message_preview': message[:100]
-                },
-                visitor_info=visitor_info
-            )
+            # NE PAS appeler _track_event() ici (ferait requête DB sur transaction échouée)
             
             return {
                 'conversation_id': conversation_id or 'error',
-                'response': "Désolé, une erreur s'est produite. Notre équipe a été notifiée. Pouvez-vous reformuler votre question ?",
+                'response': "Désolé, une erreur s'est produite. Notre équipe a été notifiée. Pouvez-vous reformuler votre demande ?",
                 'intent': 'error',
                 'intent_confidence': 0.0,
                 'agent_used': 'error_handler',
