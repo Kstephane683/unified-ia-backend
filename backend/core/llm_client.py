@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import time
 import sys
+import os
 
 
 class LLMClient:
@@ -44,7 +45,11 @@ class LLMClient:
     
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """
-        Charger la configuration depuis config_ia.json
+        Charger la configuration depuis config_ia.json ou variables d'environnement
+        
+        Priorité:
+        1. Fichier config_ia.json (dev local)
+        2. Variables d'environnement (Railway, production)
         """
         if config_path:
             config_file = Path(config_path)
@@ -61,15 +66,40 @@ class LLMClient:
                     config_file = path
                     break
         
-        if not config_file or not config_file.exists():
-            print(f"⚠️  config_ia.json non trouvé, utilisation config par défaut", file=sys.stderr)
-            return {}
+        # Tenter de charger depuis fichier
+        if config_file and config_file.exists():
+            try:
+                return json.loads(config_file.read_text())
+            except Exception as e:
+                print(f"⚠️  Erreur lecture config_ia.json: {e}", file=sys.stderr)
         
-        try:
-            return json.loads(config_file.read_text())
-        except Exception as e:
-            print(f"⚠️  Erreur lecture config_ia.json: {e}", file=sys.stderr)
-            return {}
+        # Fallback sur variables d'environnement (Railway)
+        env_config = {
+            'api_keys': {
+                'deepseek': os.getenv('DEEPSEEK_API_KEY', ''),
+                'openai': os.getenv('OPENAI_API_KEY', ''),
+            },
+            'claude_gateway': {
+                'url': os.getenv('CLAUDE_GATEWAY_URL', ''),
+                'api_key': os.getenv('CLAUDE_GATEWAY_KEY', ''),
+                'model': os.getenv('CLAUDE_MODEL', 'claude-sonnet-5')
+            },
+            'provider': os.getenv('DEFAULT_LLM_PROVIDER', 'deepseek')
+        }
+        
+        # Vérifier si au moins une clé API est présente
+        has_keys = any([
+            env_config['api_keys']['deepseek'],
+            env_config['api_keys']['openai'],
+            env_config['claude_gateway']['api_key']
+        ])
+        
+        if has_keys:
+            print(f"✅ Configuration LLM chargée depuis variables d'environnement", file=sys.stderr)
+            return env_config
+        
+        print(f"⚠️  config_ia.json non trouvé et aucune variable d'environnement", file=sys.stderr)
+        return {}
     
     async def chat_completion(
         self,
