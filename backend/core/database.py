@@ -3,9 +3,9 @@ Database connection and session management.
 
 Architecture:
 - SQLAlchemy 2.0 ORM
-- MySQL/MariaDB via pymysql
+- PostgreSQL (Railway) or MySQL/MariaDB (local)
 - Session factory with dependency injection
-- Connection pooling configured for LWS shared hosting
+- Connection pooling configured
 """
 
 from sqlalchemy import create_engine, event
@@ -16,17 +16,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Database URL from environment (dev by default)
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "mysql+pymysql://unified_dev:dev_password_2026@localhost/unified_ia_dev"
-)
+# Database URL from environment
+# Railway provides DATABASE_URL automatically for PostgreSQL
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    # Fallback for local development (MySQL)
+    DATABASE_URL = "mysql+pymysql://unified_dev:dev_password_2026@localhost/unified_ia_dev"
 
 # Engine configuration
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  # Verify connections before using
-    pool_size=5,  # Conservative for shared hosting
+    pool_size=5,
     max_overflow=10,
     pool_recycle=3600,  # Recycle connections every hour
     echo=False,  # Set True for SQL debugging
