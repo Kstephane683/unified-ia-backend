@@ -37,6 +37,16 @@ def get_metadata(conversation: ChatbotConversation) -> Dict[str, Any]:
     return conversation.conversation_metadata or {}
 
 
+def set_metadata(conversation: ChatbotConversation, meta: Dict[str, Any]) -> None:
+    """Réassigne une COPIE du dict.
+
+    Colonne JSON plain (pas MutableList): SQLAlchemy détecte le changement
+    par IDENTITÉ d'objet au flush. Muter puis réassigner le même objet =
+    commit no-op → mutations perdues silencieusement (bug takeover).
+    """
+    conversation.conversation_metadata = dict(meta)
+
+
 # ============================================================
 # Schemas
 # ============================================================
@@ -203,7 +213,7 @@ async def takeover_conversation(
     meta = get_metadata(conversation)
     meta["human_active"] = True
     meta["taken_over_at"] = datetime.utcnow().isoformat()
-    conversation.conversation_metadata = meta
+    set_metadata(conversation, meta)
     conversation.status = "escalated"
     db.commit()
 
@@ -231,7 +241,7 @@ async def release_conversation(
 
     meta = get_metadata(conversation)
     meta["human_active"] = False
-    conversation.conversation_metadata = meta
+    set_metadata(conversation, meta)
     conversation.status = "active"
     db.commit()
 
@@ -298,7 +308,7 @@ async def assign_agent(
 
     meta = get_metadata(conversation)
     meta["assigned_agent"] = request.agent_key
-    conversation.conversation_metadata = meta
+    set_metadata(conversation, meta)
     db.commit()
 
     return {"ok": True, "conversation_id": conversation_id, "assigned_agent": request.agent_key}
