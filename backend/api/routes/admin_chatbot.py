@@ -102,8 +102,9 @@ async def list_conversations(
                 "human_active": bool(meta.get("human_active")),
                 "assigned_agent": meta.get("assigned_agent"),
                 "lead_captured": bool(conv.lead_captured),
-                "lead_name": lead.visitor_name if lead else None,
-                "lead_phone": lead.visitor_phone if lead else None,
+                # Schéma réel: conversation.visitor_name + chatbot_leads.name
+                "lead_name": (conv.visitor_name or (lead.name if lead else None)),
+                "lead_phone": (conv.visitor_phone or (lead.phone if lead else None)),
                 "message_count": conv.message_count,
                 "last_message": last_message.content[:120] if last_message else None,
                 "last_message_role": last_message.role if last_message else None,
@@ -155,12 +156,13 @@ async def get_conversation_detail(
             "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
             "last_message_at": conversation.last_message_at.isoformat() if conversation.last_message_at else None,
         },
+        # Schéma réel: visiteur sur la conversation, lead avec name/email/phone
         "lead": {
-            "name": lead.visitor_name if lead else None,
-            "email": lead.visitor_email if lead else None,
-            "phone": lead.visitor_phone if lead else None,
+            "name": conversation.visitor_name or (lead.name if lead else None),
+            "email": conversation.visitor_email or (lead.email if lead else None),
+            "phone": conversation.visitor_phone or (lead.phone if lead else None),
         }
-        if lead
+        if (conversation.visitor_name or lead)
         else None,
         "messages": [
             {
