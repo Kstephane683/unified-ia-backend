@@ -193,7 +193,7 @@ async def get_conversation_detail(
 # Takeover humain / rendu la main / message humain / assign
 # ============================================================
 
-@router.post("/admin/conversations/{conversation_id}/takeover", response_model=TakeoverResponse)
+@router.post("/admin/conversations/{conversation_id}/takeover")
 async def takeover_conversation(
     conversation_id: str,
     db: Session = Depends(get_db),
@@ -216,10 +216,18 @@ async def takeover_conversation(
     set_metadata(conversation, meta)
     conversation.status = "escalated"
     db.commit()
+    db.refresh(conversation)
 
-    return TakeoverResponse(
-        conversation_id=conversation_id, status="escalated", human_active=True
-    )
+    # Debug persistance: la metadata relue depuis la DB juste après commit.
+    # Si human_active=False ici → le flush n'écrit pas la colonne JSON
+    # (bug ORM subtil) ; si True ici mais False à la lecture suivante →
+    # problème réseau/réplication.
+    return {
+        "conversation_id": conversation_id,
+        "status": conversation.status,
+        "human_active": bool(get_metadata(conversation).get("human_active")),
+        "after_commit_metadata": conversation.conversation_metadata,
+    }
 
 
 @router.post("/admin/conversations/{conversation_id}/release", response_model=TakeoverResponse)
