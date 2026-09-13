@@ -24,7 +24,7 @@ from backend.core.database import get_db
 from backend.core.models import User
 from backend.chatbot.models import ChatbotConversation, ChatbotLead, ChatbotMessage
 
-router = APIRouter()
+router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
 
 def require_admin(current_user: dict) -> None:
