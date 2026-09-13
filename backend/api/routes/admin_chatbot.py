@@ -300,3 +300,40 @@ async def assign_agent(
     db.commit()
 
     return {"ok": True, "conversation_id": conversation_id, "assigned_agent": request.agent_key}
+
+
+# ============================================================
+# Debug: schéma réel d'une table (le modèle ORM peut diverger de la DB)
+# ============================================================
+
+_ALLOWED_TABLES = {
+    "chatbot_leads",
+    "chatbot_conversations",
+    "chatbot_messages",
+    "chatbot_sites",
+    "chatbot_analytics",
+    "users",
+}
+
+
+@router.get("/admin/debug/schema/{table_name}")
+async def inspect_table_schema(
+    table_name: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Colonnes réelles d'une table (information_schema) — whitelist stricte."""
+    require_admin(current_user)
+    if table_name not in _ALLOWED_TABLES:
+        raise HTTPException(status_code=400, detail="Table non autorisée")
+
+    from sqlalchemy import text
+
+    rows = db.execute(
+        text(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name = :t ORDER BY ordinal_position"
+        ),
+        {"t": table_name},
+    ).fetchall()
+    return {table_name: [{"column": r[0], "type": r[1]} for r in rows]}
