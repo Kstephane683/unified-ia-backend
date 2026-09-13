@@ -73,8 +73,13 @@ class ContextBuilder:
             # Sinon, charger depuis la DB
             history = self._load_conversation_history(conversation_id, limit=10)
             if history:
-                context['history'] = history
-                context['sources'].append('db_history')
+                # Le dernier message en DB est le message courant (sauvé juste
+                # avant build_context) — le response_generator l'ajoute déjà
+                # lui-même au payload LLM → l'exclure pour éviter le doublon
+                history = history[:-1]
+                if history:
+                    context['history'] = history
+                    context['sources'].append('db_history')
         
         # 3. User profile (si connecté)
         if user_id:
