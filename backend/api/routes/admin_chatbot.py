@@ -338,4 +338,17 @@ async def inspect_table_schema(
         ),
         {"t": table_name},
     ).fetchall()
-    return {table_name: [{"column": r[0], "type": r[1]} for r in rows]}
+    result: Dict[str, Any] = {table_name: [{"column": r[0], "type": r[1]} for r in rows]}
+
+    # Enums PostgreSQL utilisés par la table (lead_type, status…)
+    enum_rows = db.execute(
+        text(
+            "SELECT t.typname, e.enumlabel FROM pg_type t "
+            "JOIN pg_enum e ON e.enumtypid = t.oid ORDER BY t.typname, e.enumsortorder"
+        )
+    ).fetchall()
+    enums: Dict[str, List[str]] = {}
+    for typname, enumlabel in enum_rows:
+        enums.setdefault(typname, []).append(enumlabel)
+    result["enums"] = enums
+    return result
