@@ -374,3 +374,100 @@ async def inspect_table_schema(
     return result
 
 
+
+
+# ============================================================
+# ADMINISTRATION UNIFIÉE — Utilisateurs, Candidats, Abonnements
+# ============================================================
+
+from backend.core.models import Candidat, User
+from sqlalchemy import func as sa_func
+
+
+@router.get("/admin/users")
+async def admin_list_users(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Comptes utilisateurs (auth unifiée)."""
+    require_admin(current_user)
+    users = db.query(User).order_by(User.created_at.desc()).limit(min(limit, 500)).all()
+    return {
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "nom": getattr(u, "nom", None),
+                "role": u.role,
+                "is_active": u.is_active,
+                "last_login": u.last_login.isoformat() if u.last_login else None,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in users
+        ],
+        "total": len(users),
+    }
+
+
+@router.get("/admin/candidats")
+async def admin_list_candidats(
+    statut: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Candidats & diagnostics (leads qualifiés avec score)."""
+    require_admin(current_user)
+    query = db.query(Candidat)
+    if statut:
+        query = query.filter(Candidat.statut == statut)
+    candidats = query.order_by(Candidat.created_at.desc()).limit(min(limit, 500)).all()
+    return {
+        "candidats": [
+            {
+                "id": c.id,
+                "nom": c.nom,
+                "email": c.email,
+                "whatsapp": c.whatsapp,
+                "entreprise": c.entreprise,
+                "secteur": c.secteur,
+                "score": c.score,
+                "statut": c.statut,
+                "niveau_accompagnement": c.niveau_accompagnement,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in candidats
+        ],
+        "total": len(candidats),
+    }
+
+
+@router.get("/admin/stats")
+async def admin_stats(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """KPIs d'en-tête du cockpit unifié."""
+    require_admin(current_user)
+
+    def count(model, *filters):
+        q = db.query(sa_func.count(model.id))
+        for f in filters:
+            q = q.filter(f)
+        return q.scalar() or 0
+
+    conv_escalated = (
+        db.query(sa_func.count(ChatbotConversation.id))
+        .filter(ChatbotConversation.status == "escalated")
+        .scalar()
+        or 0
+    )
+    return {
+        "conversations": count(ChatbotConversation),
+        "conversations_en_attente": conv_escalated,
+        "leads_chatbot": count(ChatbotLead),
+        "candidats": count(Candidat),
+        "candidats_en_attente": count(Candidat, Candidat.statut == "en_attente"),
+        "users": count(User),
+    }
