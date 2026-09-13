@@ -67,6 +67,8 @@ def root():
         "status": "operational",
         "environment": ENV,
         "docs": "/docs" if DEBUG else "disabled",
+        # SHA du commit déployé (observabilité déploiements Railway)
+        "commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "local")[:10],
     }
 
 
