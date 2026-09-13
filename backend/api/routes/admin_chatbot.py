@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm.attributes import flag_modified
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -38,13 +39,14 @@ def get_metadata(conversation: ChatbotConversation) -> Dict[str, Any]:
 
 
 def set_metadata(conversation: ChatbotConversation, meta: Dict[str, Any]) -> None:
-    """Réassigne une COPIE du dict.
+    """Réassigne une COPIE du dict et FORCE le flag de modification.
 
-    Colonne JSON plain (pas MutableList): SQLAlchemy détecte le changement
-    par IDENTITÉ d'objet au flush. Muter puis réassigner le même objet =
-    commit no-op → mutations perdues silencieusement (bug takeover).
+    Colonne JSON plain: SQLAlchemy compare new == old au flush — une copie
+    du dict est ÉGALE à l'original → colonne jamais incluse dans l'UPDATE
+    (mutations perdues silencieusement). flag_modified() force l'écriture.
     """
     conversation.conversation_metadata = dict(meta)
+    flag_modified(conversation, "conversation_metadata")
 
 
 # ============================================================
