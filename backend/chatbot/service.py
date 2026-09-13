@@ -119,7 +119,29 @@ class ChatbotService:
                 user_id=user_id,
                 visitor_info=visitor_info
             )
-            
+
+            # 1bis. Takeover humain: le LLM est en pause sur cette conversation,
+            # on enregistre le message et on signale au widget que l'humain parle.
+            conv_meta = conversation.conversation_metadata or {}
+            if conversation.status == 'escalated' and conv_meta.get('human_active'):
+                self._save_message(
+                    conversation_id=conversation_id,
+                    role='user',
+                    content=message
+                )
+                self._update_conversation(conversation_id)
+                return {
+                    'conversation_id': conversation_id,
+                    'response': '',
+                    'intent': 'human_takeover',
+                    'intent_confidence': 1.0,
+                    'agent_used': None,
+                    'suggestions': [],
+                    'actions': [],
+                    'processing_time_ms': int((time.time() - start_time) * 1000),
+                    'human_active': True
+                }
+
             # 2. Sauvegarder le message utilisateur
             user_message = self._save_message(
                 conversation_id=conversation_id,
@@ -148,6 +170,11 @@ class ChatbotService:
                 context=context,
                 intent_metadata=intent_metadata
             )
+
+            # 5bis. Override admin: agent assigné manuellement depuis le dashboard
+            forced_agent = conv_meta.get('assigned_agent')
+            if forced_agent:
+                agent_key = forced_agent
             
             # 6. Generate response (Phase 1-J3)
             response_text, generation_metadata = await self.response_generator.generate_response(

@@ -163,6 +163,7 @@ async def shutdown_event():
 # ============================================================
 
 from backend.api.routes import auth, diagnostic, subscriptions_legacy, products_legacy, chatbot
+from backend.api.routes import admin_chatbot
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(diagnostic.router, prefix="/api", tags=["Diagnostic & Candidats"])
@@ -171,6 +172,7 @@ app.include_router(products_legacy.router, tags=["Products"])  # Prefix already 
 
 # Phase 1-S1.4 : Chatbot IA (Deep Chat + 29 agents)
 app.include_router(chatbot.router, tags=["Chatbot IA"])  # Prefix already in router (/api/chatbot)
+app.include_router(admin_chatbot.router, tags=["Chatbot IA"])  # Prefix already in router (/api/chatbot/admin)
 
 
 if __name__ == "__main__":
