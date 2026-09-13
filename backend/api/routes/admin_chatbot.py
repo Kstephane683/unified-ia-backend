@@ -374,25 +374,3 @@ async def inspect_table_schema(
     return result
 
 
-@router.post("/admin/debug/meta-write/{conversation_id}")
-async def debug_meta_write(
-    conversation_id: str,
-    body: Dict[str, Any],
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """Diagnostic écriture metadata: écrit une copie fraîche, commit, refresh,
-    relit — rend l'état APRÈS commit (distingue échec d'écriture vs cache)."""
-    require_admin(current_user)
-    conversation = (
-        db.query(ChatbotConversation)
-        .filter(ChatbotConversation.conversation_id == conversation_id)
-        .first()
-    )
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    conversation.conversation_metadata = dict(body)
-    db.commit()
-    db.refresh(conversation)
-    return {"after_commit_read": conversation.conversation_metadata, "written": body}

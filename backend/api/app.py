@@ -41,8 +41,48 @@ app = FastAPI(
     description="Plateforme IA unifiée - Backend API pour l'écosystème ePerformance",
     version="1.0.0",
     docs_url="/docs" if DEBUG else None,  # Disable docs in production
-    redoc_url="/redoc" if DEBUG else None,
+    redoc_url=None,  # Disable redoc in production
+    openapi_url="/openapi.json" if DEBUG else None,  # Disable openapi schema in production
 )
+
+
+# ============================================================
+# Rate limiting simple (in-memory, par instance) — P1 sécurité
+# ============================================================
+import time as _time
+from collections import defaultdict, deque
+
+from fastapi.responses import JSONResponse
+
+# chemin → (max requêtes, fenêtre secondes)
+_RATE_LIMITS = {
+    "/api/chatbot/message": (12, 60),      # coût LLM
+    "/api/auth/register": (5, 300),        # spam de comptes
+    "/api/auth/login": (10, 300),          # brute force
+}
+_rate_bucket: dict = defaultdict(deque)
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request, call_next):
+    rule = _RATE_LIMITS.get(request.url.path)
+    if rule:
+        client_ip = (
+            request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+            or (request.client.host if request.client else "unknown")
+        )
+        now = _time.time()
+        key = (request.url.path, client_ip)
+        bucket = _rate_bucket[key]
+        while bucket and bucket[0] < now - rule[1]:
+            bucket.popleft()
+        if len(bucket) >= rule[0]:
+            return JSONResponse(
+                {"detail": "Trop de requêtes. Réessayez dans un instant."},
+                status_code=429,
+            )
+        bucket.append(now)
+    return await call_next(request)
 
 # CORS middleware
 app.add_middleware(

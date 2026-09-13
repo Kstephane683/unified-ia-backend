@@ -296,7 +296,7 @@ async def send_message(
                     "agent_used": result.get('agent_used'),
                     "actions": result.get('actions', []),
                     "suggestions": suggestions,
-                    "processing_time": result.get('processing_time', 0),
+                    "processing_time": result.get('processing_time_ms', 0),
                     "human_active": result.get('human_active', False)
                 }
             )
@@ -310,7 +310,7 @@ async def send_message(
                     "agent_used": result.get('agent_used'),
                     "actions": result.get('actions', []),
                     "suggestions": suggestions,
-                    "processing_time": result.get('processing_time', 0),
+                    "processing_time": result.get('processing_time_ms', 0),
                     "human_active": result.get('human_active', False)
                 }
             )

@@ -36,7 +36,7 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     nom: str
-    role: str = "lead"  # lead, client, apprenant, admin
+    # SÉCURITÉ: le rôle est forcé côté serveur (jamais accepté du client)
     
     class Config:
         json_schema_extra = {
@@ -102,7 +102,7 @@ def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
     new_user = User(
         email=user_data.email,
         password_hash=get_password_hash(user_data.password),
-        role=user_data.role,
+        role='lead',  # SÉCURITÉ: whitelist serveur — les admins sont créés via SQL/CLI uniquement
         is_active=True,
         created_at=datetime.now(),
     )
