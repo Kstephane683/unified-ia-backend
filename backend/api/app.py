@@ -175,6 +175,21 @@ app.include_router(chatbot.router, tags=["Chatbot IA"])  # Prefix already in rou
 app.include_router(admin_chatbot.router, tags=["Chatbot IA"])  # Prefix already in router (/api/chatbot/admin)
 
 
+# ============================================================
+# Création idempotente des tables manquantes (au boot)
+# ============================================================
+# Les tables chatbot avaient été créées par script, mais jamais les tables
+# core (users…) → login 500 "relation users does not exist" en production.
+# create_all n'ajoute QUE les tables absentes — aucune migration destructrice.
+try:
+    from backend.core.database import init_db
+
+    init_db()
+    print("[startup] init_db OK — tables vérifiées/créées")
+except Exception as _db_init_error:  # l'app doit démarrer même si la DB tarde
+    print(f"[startup] init_db ÉCHEC (non bloquant): {_db_init_error}")
+
+
 if __name__ == "__main__":
     """
     Run directly for development (not recommended for production).
