@@ -87,15 +87,16 @@ class ChatbotMessageResponse(BaseModel):
       "files": [...]  // Optionnel
     }
     
-    On ajoute des métadonnées dans custom field _metadata (ignoré par Deep Chat)
+    On ajoute des métadonnées via le champ `metadata` (conversation_id, intent,
+    agent_used, actions, suggestions) — ignoré par Deep Chat, exploité par le widget Vue
     """
     text: Optional[str] = None
     html: Optional[str] = None
     files: Optional[List[Dict[str, Any]]] = None
     
-    # Métadonnées internes (non utilisées par Deep Chat UI, mais utiles pour analytics)
-    # Note: Pydantic interdit les champs commençant par underscore, on utilise alias
-    metadata_internal: Optional[Dict[str, Any]] = Field(None, exclude=True, alias="metadata")
+    # Métadonnées pour le widget (conversation_id, intent, agent, suggestions)
+    # NB: Deep Chat ignore les champs inconnus — notre widget Vue les exploite
+    metadata: Optional[Dict[str, Any]] = None
     
     class Config:
         json_schema_extra = {
@@ -122,8 +123,8 @@ class ConversationHistoryResponse(BaseModel):
     conversation_id: str
     site_id: str
     status: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     messages: List[Dict[str, Any]]
     
     class Config:
@@ -289,11 +290,12 @@ async def send_message(
             
             response = ChatbotMessageResponse(
                 html=html_response,
-                _metadata={
+                metadata={
                     "conversation_id": result.get('conversation_id'),
                     "intent": result.get('intent'),
                     "agent_used": result.get('agent_used'),
                     "actions": result.get('actions', []),
+                    "suggestions": suggestions,
                     "processing_time": result.get('processing_time', 0)
                 }
             )
@@ -301,11 +303,12 @@ async def send_message(
             # Réponse simple sans suggestions
             response = ChatbotMessageResponse(
                 text=response_text,
-                _metadata={
+                metadata={
                     "conversation_id": result.get('conversation_id'),
                     "intent": result.get('intent'),
                     "agent_used": result.get('agent_used'),
                     "actions": result.get('actions', []),
+                    "suggestions": suggestions,
                     "processing_time": result.get('processing_time', 0)
                 }
             )
@@ -329,8 +332,7 @@ async def send_message(
         # Réponse fallback en cas d'erreur
         return ChatbotMessageResponse(
             text="Désolé, une erreur s'est produite. Notre équipe a été notifiée. Pouvez-vous reformuler votre demande ?",
-            _metadata={"error": str(e)}
-        )
+            metadata={"error": str(e)}        )
 
 
 @router.get("/conversation/{conversation_id}", response_model=ConversationHistoryResponse)
@@ -361,24 +363,27 @@ async def get_conversation_history(
         ).order_by(ChatbotMessage.created_at.asc()).all()
         
         # Formatter messages
+        # NB: colonne = actions_executed (msg.actions n'existe pas → 500)
+        # suggestions incluses pour réhydrater les quick replies du widget
         messages_formatted = [
             {
                 "role": msg.role,
                 "content": msg.content,
                 "intent": msg.intent,
                 "agent_used": msg.agent_used,
-                "actions": msg.actions,
-                "created_at": msg.created_at.isoformat()
+                "actions": msg.actions_executed,
+                "suggestions": msg.suggestions,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None
             }
             for msg in messages
         ]
-        
+
         return ConversationHistoryResponse(
             conversation_id=conversation.conversation_id,
             site_id=conversation.site_id,
             status=conversation.status,
-            created_at=conversation.created_at,
-            updated_at=conversation.updated_at,
+            created_at=conversation.created_at or conversation.started_at,
+            updated_at=conversation.updated_at or conversation.last_message_at or conversation.started_at,
             messages=messages_formatted
         )
         

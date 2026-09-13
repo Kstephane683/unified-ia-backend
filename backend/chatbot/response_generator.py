@@ -328,7 +328,7 @@ ePerformance est une agence spécialisée en marketing digital et systèmes d'ac
             parts.append("")
         
         # Historique récent
-        history = context.get('message_history', [])
+        history = context.get('history', [])
         if len(history) > 0:
             parts.append("## Historique Récent (contexte)")
             for msg in history[-3:]:  # 3 derniers messages
@@ -446,9 +446,13 @@ Proposer diagnostic gratuit pour personnaliser la stratégie.
         ]
         
         # Ajouter l'historique récent (5 derniers échanges max)
-        history = context.get('message_history', [])
+        # NB: clé 'history' (remplie par ContextBuilder); rôles normalisés pour le LLM
+        # (format Deep Chat 'ai' depuis le widget → 'assistant' attendu par DeepSeek)
+        history = context.get('history', [])
         for msg in history[-10:]:  # 5 échanges = 10 messages
             role = msg.get('role', 'user')
+            if role == 'ai':
+                role = 'assistant'
             content = msg.get('content', '')
             if content:
                 messages.append({"role": role, "content": content})
