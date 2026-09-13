@@ -169,22 +169,53 @@ class ChatbotLead(Base):
     """
     Leads capturés pendant les conversations
     → Notifications équipe via système communication Phase 1-S1.3
+
+    NB: aligné sur le schéma RÉEL de la table (inspecté via
+    /api/chatbot/admin/debug/schema — l'ancien modèle référencait des
+    colonnes visitor_* inexistantes → toute requête ORM plantait).
     """
     __tablename__ = "chatbot_leads"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     conversation_id = Column(String(100), nullable=False, index=True, comment='Conversation source')
     site_id = Column(String(100), nullable=False, index=True, comment='Site source')
-    
-    # Informations lead (colonnes réelles de la table)
-    visitor_name = Column(String(200), nullable=True, comment='Nom du visiteur')
-    visitor_email = Column(String(200), nullable=True, index=True, comment='Email du visiteur')
-    visitor_phone = Column(String(50), nullable=True, index=True, comment='Téléphone du visiteur')
-    conversation_transcript = Column(Text, nullable=True, comment='Transcript de la conversation')
-    captured_at = Column(TIMESTAMP, server_default=func.current_timestamp(), comment='Date de capture')
-    
+
+    # Contact
+    name = Column(String(200), nullable=True, comment='Nom du lead')
+    email = Column(String(200), nullable=True, index=True, comment='Email du lead')
+    phone = Column(String(50), nullable=True, comment='Téléphone du lead')
+    company = Column(String(200), nullable=True, comment='Entreprise')
+
+    # Qualification
+    lead_type = Column(Enum('hot', 'warm', 'cold', 'information', name='lead_type'),
+                       nullable=True, comment='Température du lead')
+    intent = Column(String(100), nullable=True, comment='Intent à la capture')
+    message = Column(Text, nullable=True, comment='Message du lead')
+    interested_products = Column(JSON, nullable=True, comment='Produits/services d\'intérêt')
+    budget_range = Column(String(50), nullable=True, comment='Fourchette de budget')
+    urgency = Column(String(50), nullable=True, comment='Urgence')
+
+    # Suivi commercial
+    status = Column(Enum('new', 'contacted', 'qualified', 'converted', 'lost', name='lead_status'),
+                    nullable=True, comment='Statut commercial')
+    assigned_to = Column(String(200), nullable=True, comment='Assigné à')
+    notification_sent = Column(Boolean, nullable=True, comment='Notification équipe envoyée')
+    notification_ids = Column(JSON, nullable=True, comment='IDs des notifications envoyées')
+    first_contact_at = Column(TIMESTAMP, nullable=True, comment='Premier contact')
+    converted_at = Column(TIMESTAMP, nullable=True, comment='Date de conversion')
+    conversion_value = Column(DECIMAL(12, 2), nullable=True, comment='Valeur de conversion')
+
+    # Contexte
+    source_url = Column(String(500), nullable=True, comment='URL source')
+    utm_data = Column(JSON, nullable=True, comment='Données UTM')
+    lead_metadata = Column('metadata', JSON, nullable=True, comment='Données additionnelles')
+
+    created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                        onupdate=func.current_timestamp())
+
     def __repr__(self):
-        return f"<ChatbotLead(id={self.id}, name={self.visitor_name})>"
+        return f"<ChatbotLead(id={self.id}, name={self.name})>"
 
 
 class ChatbotAnalytics(Base):
@@ -225,5 +256,5 @@ class ChatbotAnalytics(Base):
 Index('idx_conversations_site_status', ChatbotConversation.site_id, ChatbotConversation.status)
 Index('idx_conversations_site_started', ChatbotConversation.site_id, ChatbotConversation.started_at)
 Index('idx_messages_conversation_created', ChatbotMessage.conversation_id, ChatbotMessage.created_at)
-Index('idx_leads_site_captured', ChatbotLead.site_id, ChatbotLead.captured_at)
+Index('idx_leads_site_created', ChatbotLead.site_id, ChatbotLead.created_at)
 Index('idx_analytics_site_type_timestamp', ChatbotAnalytics.site_id, ChatbotAnalytics.event_type, ChatbotAnalytics.timestamp)
