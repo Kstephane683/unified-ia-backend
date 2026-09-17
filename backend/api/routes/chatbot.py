@@ -16,6 +16,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
 
+from ...core.auth import get_current_user
 from ...core.database import get_db
 from ...chatbot.service import ChatbotService
 from ...chatbot.models import ChatbotConversation, ChatbotMessage, ChatbotSite
