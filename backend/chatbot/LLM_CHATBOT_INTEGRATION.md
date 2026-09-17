@@ -151,7 +151,7 @@ return {
 **Cas d'usage** : Négociation, traitement objections, closing vente
 
 #### `/backend/chatbot/agents/support/customer_support.md`
-**Persona** : Aminata, support client
+**Persona** : Mia, support client
 **Spécialités** : Questions générales, FAQ, escalade, satisfaction
 **Style** : Chaleureux, patient, proactif
 **Cas d'usage** : Horaires, contact, process, orientation vers experts

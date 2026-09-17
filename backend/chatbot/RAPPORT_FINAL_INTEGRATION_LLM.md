@@ -55,7 +55,7 @@ L'intégration complète du système LLM dans le chatbot ePerformance est **opé
 
 #### d) Customer Support
 **Fichier**: `/backend/chatbot/agents/support/customer_support.md`
-- **Persona**: Aminata, support client
+- **Persona**: Mia, support client
 - **Expertise**: FAQ, escalade, horaires, process
 - **Style**: Chaleureux, patient, proactif
 
