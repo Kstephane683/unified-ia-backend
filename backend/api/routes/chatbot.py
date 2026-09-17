@@ -400,7 +400,8 @@ async def get_conversation_history(
 async def configure_site(
     site_id: str,
     config: SiteConfigRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Configurer un site multi-tenant (admin uniquement)
@@ -417,6 +418,10 @@ async def configure_site(
     - mlm_marie_longrich: Opportunité MLM, produits Longrich, parrainage
     - salon_beauty_queen: RDV, prestations beauté, tarifs
     """
+    # Sécurité (Phase 0) : configuration réservée aux administrateurs
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
     try:
         # Vérifier si site existe
         site = db.query(ChatbotSite).filter(
