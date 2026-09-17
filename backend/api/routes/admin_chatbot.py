@@ -183,6 +183,7 @@ async def get_conversation_detail(
                 "role": msg.role,
                 "content": msg.content,
                 "human": bool((msg.context_data or {}).get("human")),
+                "human_name": (msg.context_data or {}).get("human_name"),
                 "agent_used": msg.agent_used,
                 "intent": msg.intent,
                 "created_at": msg.created_at.isoformat() if msg.created_at else None,
@@ -216,6 +217,9 @@ async def takeover_conversation(
     meta = get_metadata(conversation)
     meta["human_active"] = True
     meta["taken_over_at"] = datetime.utcnow().isoformat()
+    # Tâche 5.3 : nom réel du conseiller (affiché au visiteur, pas "Conseiller")
+    meta["taken_over_by"] = current_user.get("email") or current_user.get("sub") or "L'équipe ePerformance"
+    meta["counselor_name"] = current_user.get("nom") or meta.get("counselor_name") or "Conseiller ePerformance"
     set_metadata(conversation, meta)
     conversation.status = "escalated"
     db.commit()
@@ -281,12 +285,14 @@ async def send_human_message(
     if not content:
         raise HTTPException(status_code=400, detail="Empty message")
 
+    counselor = (conversation.conversation_metadata or {}).get("counselor_name") \
+        or current_user.get("nom") or "Conseiller ePerformance"
     message = ChatbotMessage(
         conversation_id=conversation_id,
         role="assistant",  # enum DB: user/assistant/system — humain marqué via context_data
         content=content,
         agent_used=None,
-        context_data={"human": True},
+        context_data={"human": True, "human_name": counselor},
     )
     db.add(message)
     conversation.last_message_at = datetime.utcnow()
