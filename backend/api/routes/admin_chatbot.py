@@ -13,6 +13,7 @@ conversation_metadata (JSONB) — cf contrat dashboard.
 """
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -471,3 +472,69 @@ async def admin_stats(
         "candidats_en_attente": count(Candidat, Candidat.statut == "en_attente"),
         "users": count(User),
     }
+
+
+# ============================================================
+# AGENTS — catalogue des 27 agents IA (Phase 2, Tâche 5.2)
+# ============================================================
+
+_AGENTS_DIR = Path(__file__).resolve().parents[2] / "chatbot" / "agents"
+
+
+def _parse_agent_file(path: Path) -> Optional[Dict[str, Any]]:
+    """Extrait key/category/label d'un fichier agent Markdown."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    agent_key = None
+    category = None
+    label = None
+
+    # Frontmatter YAML (--- ... ---)
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            for line in text[3:end].splitlines():
+                if ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                k = k.strip().lower()
+                v = v.strip().strip('"\'')
+                if k == "agent_key" and v:
+                    agent_key = v
+                elif k == "category" and v:
+                    category = v
+
+    # Libellé : "heading # Persona: X" sinon la clé
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# Persona:"):
+            label = stripped.split(":", 1)[1].strip()
+            break
+
+    key = agent_key or path.stem
+    return {
+        "key": key,
+        "label": label or key.replace("_", " ").replace("-", " ").title(),
+        "category": category or path.parent.name,
+    }
+
+
+@router.get("/admin/agents")
+async def list_agents_admin(
+    current_user: dict = Depends(get_current_user),
+):
+    """Catalogue des agents IA disponibles (27) — pour le sélecteur d'assignation."""
+    require_admin(current_user)
+
+    agents: List[Dict[str, Any]] = []
+    if _AGENTS_DIR.is_dir():
+        for md_file in sorted(_AGENTS_DIR.rglob("*.md")):
+            parsed = _parse_agent_file(md_file)
+            if parsed:
+                agents.append(parsed)
+
+    agents.sort(key=lambda a: (a["category"], a["key"]))
+    return {"agents": agents, "total": len(agents)}
