@@ -300,10 +300,10 @@ async def send_message(
         metadata = {
             "conversation_id": result.get('conversation_id'),
             "intent": result.get('intent'),
-            # `agent_used` RESTE dans la metadata (observabilité, dashboard
-            # admin, analytics) mais le widget ne l'affiche JAMAIS : règle A.6,
-            # un seul nom visible côté visiteur — Mia.
-            "agent_used": result.get('agent_used'),
+            # `agent_used` est VOLONTAIREMENT ABSENT (DÉCISION Ballo + règle A.6) :
+            # aucun nom d'agent ne doit être lisible côté visiteur, y compris en
+            # inspectant le trafic réseau. Le dashboard admin l'obtient par ses
+            # propres endpoints protégés (`/api/chatbot/admin/*`).
             "actions": result.get('actions', []),
             "suggestions": result.get('suggestions', []),
             "processing_time": result.get('processing_time_ms', 0),
