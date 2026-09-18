@@ -6,13 +6,15 @@ Routes:
 - POST /api/chatbot/message - Envoyer message (pipeline complet)
 - GET /api/chatbot/conversation/{id} - Historique conversation
 - GET /api/chatbot/search - Recherche dans les articles du blog (tâche 6.8)
+- POST /api/chatbot/push/subscribe - Abonnement au push navigateur (P3-PUSH, public)
+- DELETE /api/chatbot/push/unsubscribe - Désabonnement (P3-PUSH, public)
 - POST /api/chatbot/sites/{site_id}/configure - Config multi-tenant (admin)
 - GET /api/chatbot/analytics/{site_id} - Métriques par site
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
@@ -22,7 +24,7 @@ from ...core.database import get_db
 from ...chatbot.service import ChatbotService
 from ...chatbot.models import ChatbotConversation, ChatbotMessage, ChatbotSite
 from ...chatbot.vision import ImageInvalide, preparer_image, resume_pour_journal
-from ...chatbot import blog_search
+from ...chatbot import blog_search, notifications, push_abonnements
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
@@ -250,6 +252,73 @@ class BlogSearchResponse(BaseModel):
     total: int = 0
     message: Optional[str] = None
     index: BlogSearchIndexState
+
+
+class PushKeysPayload(BaseModel):
+    """
+    Les deux clés produites par le navigateur (norme Web Push, RFC 8291).
+
+    `p256dh` est la clé publique éphémère du navigateur (point P-256 non
+    compressé, base64url), `auth` le secret d'authentification. Sans elles, le
+    message ne peut pas être chiffré : le service de push le refuse. Elles ne
+    sont jamais renvoyées par l'API ni écrites dans un journal.
+    """
+
+    p256dh: str = Field(..., description="Clé publique p256dh (base64url, 87 caractères)")
+    auth: str = Field(..., description="Secret d'authentification (base64url, 22 caractères)")
+
+    @field_validator("p256dh")
+    @classmethod
+    def _valider_p256dh(cls, valeur: str) -> str:
+        return push_abonnements.valider_cle(
+            valeur, "p256dh", push_abonnements.LONGUEUR_MIN_P256DH
+        )
+
+    @field_validator("auth")
+    @classmethod
+    def _valider_auth(cls, valeur: str) -> str:
+        return push_abonnements.valider_cle(
+            valeur, "auth", push_abonnements.LONGUEUR_MIN_AUTH
+        )
+
+
+class PushSubscribeRequest(BaseModel):
+    """
+    Abonnement d'un navigateur aux notifications push (P3-PUSH).
+
+    Appelé par le widget APRÈS consentement explicite du visiteur. Aucun
+    compte, aucun jeton : l'abonnement est public par nature, le visiteur n'a
+    pas d'identité sur le site.
+    """
+
+    endpoint: str = Field(..., description="URL du service de push du navigateur (https)")
+    keys: PushKeysPayload
+    conversation_id: Optional[str] = Field(
+        None, max_length=100, description="Conversation en cours, si elle existe"
+    )
+    site_id: str = Field(
+        default="eperformance_vitrine",
+        max_length=100,
+        description="Site concerné (métadonnée de diagnostic et de ciblage)",
+    )
+
+    @field_validator("endpoint")
+    @classmethod
+    def _valider_endpoint(cls, valeur: str) -> str:
+        # Lève ValueError → Pydantic renvoie 422 (jamais 500). Le détail du
+        # contrôle (https, domaine parmi les services de push connus) est dans
+        # `push_abonnements.valider_endpoint`.
+        return push_abonnements.valider_endpoint(valeur)
+
+    @field_validator("conversation_id")
+    @classmethod
+    def _nettoyer_conversation(cls, valeur: Optional[str]) -> Optional[str]:
+        return (valeur or "").strip() or None
+
+    @field_validator("site_id")
+    @classmethod
+    def _nettoyer_site(cls, valeur: str) -> str:
+        return (valeur or "").strip() or "eperformance_vitrine"
 
 
 # ============================================================
@@ -695,6 +764,134 @@ async def get_site_analytics(
     except Exception as e:
         logger.error(f"Error retrieving analytics: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve analytics")
+
+
+# ============================================================
+# PUSH NAVIGATEUR — ABONNEMENT ET DÉSABONNEMENT (P3-PUSH)
+# ============================================================
+#
+# POURQUOI CES DEUX ROUTES SONT PUBLIQUES, ET CE QUI LE COMPENSE
+# --------------------------------------------------------------
+# L'abonnement est créé par le NAVIGATEUR d'un visiteur qui n'a pas de compte :
+# exiger un jeton rendrait la fonctionnalité impossible. Ce qui remplace
+# l'authentification ici, c'est la nature de ce qui est écrit et le contrôle de
+# ce qui est accepté :
+#
+#   · ce qui est enregistré est l'URL d'un service de push et deux clés
+#     PUBLIQUES produites par le navigateur — aucune donnée personnelle ;
+#   · l'URL doit être un service de push connu (liste blanche dans
+#     `push_abonnements`) : sans ce filtre, l'enregistrement public deviendrait
+#     un relais d'envoi vers n'importe quelle adresse, réseau interne compris ;
+#   · l'enregistrement remplace la ligne de MÊME endpoint, il ne peut pas
+#     écraser celle d'un autre (l'endpoint est unique en base) ;
+#   · le désabonnement exige l'endpoint EXACT, qui n'est connu que du navigateur
+#     concerné : personne ne peut désabonner le navigateur d'un autre ;
+#   · la route d'écriture est bornée par le limiteur de débit de l'application
+#     (`_RATE_LIMITS` dans `backend/api/app.py`).
+
+
+@router.post("/push/subscribe", response_model=None)
+async def abonner_push(
+    corps: PushSubscribeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Enregistrer (ou mettre à jour) un abonnement au push navigateur (P3-PUSH).
+
+    Un même `endpoint` réabonné met à jour sa ligne : jamais de doublon, jamais
+    de 409. Le réabonnement remplace les clés (le navigateur les régénère) et
+    réactive la ligne si le visiteur s'était désabonné.
+
+    CETTE ROUTE RÉPOND 200 MÊME SI LE PUSH N'EST PAS ENCORE CONFIGURÉ (clés
+    VAPID absentes) : l'abonnement ne dépend pas des clés, et le refuser
+    ferait perdre au propriétaire les abonnements déjà consentis par les
+    visiteurs le jour où il posera les clés. L'état du canal est renvoyé dans
+    `canal` pour que l'absence de configuration soit visible, pas silencieuse.
+
+    Un corps invalide (endpoint vide, clés absentes, domaine non autorisé)
+    répond 422 : la validation est faite par Pydantic, avant toute écriture.
+    """
+    user_agent = (request.headers.get("user-agent") or "").strip()[:500] or None
+
+    abonnement, cree = push_abonnements.enregistrer(
+        db,
+        endpoint=corps.endpoint,
+        cle_p256dh=corps.keys.p256dh,
+        cle_auth=corps.keys.auth,
+        conversation_id=corps.conversation_id,
+        site_id=corps.site_id,
+        user_agent=user_agent,
+    )
+
+    etat = notifications.etat_canal("webpush")
+    reponse = {
+        "abonnement": {
+            **push_abonnements.vers_api(abonnement),
+            "cree": cree,
+        },
+        "canal": etat.pour_api(),
+    }
+    if not etat.configure:
+        # Un état, pas une erreur : l'abonnement EST enregistré.
+        reponse["message"] = (
+            "abonnement enregistré ; les notifications partiront dès que le "
+            "propriétaire aura créé les clés VAPID — rien d'autre n'est requis "
+            "côté visiteur"
+        )
+    logger.info(
+        "Abonnement push %s (site=%s, conversation=%s)",
+        "créé" if cree else "mis à jour",
+        abonnement.site_id,
+        abonnement.conversation_id,
+    )
+    return reponse
+
+
+@router.delete("/push/unsubscribe", response_model=None)
+async def desabonner_push(
+    endpoint: str = Query(
+        ...,
+        min_length=1,
+        max_length=push_abonnements.LONGUEUR_ENDPOINT_MAX,
+        description="Endpoint EXACT de l'abonnement à désactiver (renvoyé par le navigateur)",
+    ),
+    conversation_id: Optional[str] = Query(
+        None, max_length=100, description="Condition supplémentaire optionnelle"
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Désabonner un navigateur du push (P3-PUSH).
+
+    La ligne n'est PAS supprimée : elle passe à `actif = faux`. La trace est ce
+    qui permet de diagnostiquer après coup un abonnement qui a cessé de
+    recevoir, et de le réactiver si le même navigateur se réabonne.
+
+    L'`endpoint` exact est EXIGÉ : c'est lui qui garantit qu'on ne peut pas
+    désabonner le navigateur d'un autre. `conversation_id`, s'il est fourni,
+    est une condition supplémentaire — un endpoint qui ne lui correspond pas
+    n'est pas touché.
+
+    La route est idempotente et répond toujours 200 : un endpoint inconnu ne
+    produit ni erreur ni écriture, et le résultat dit exactement ce qui a été
+    fait (`abonnements_desactives`). Elle ne peut donc pas servir à découvrir
+    quels endpoints existent.
+    """
+    publics, admins = push_abonnements.desabonner(
+        db, endpoint=endpoint.strip(), conversation_id=conversation_id
+    )
+    total = publics + admins
+    return {
+        "endpoint_tronque": push_abonnements.tronquer_endpoint(endpoint),
+        "abonnements_desactives": total,
+        "detail": {"public": publics, "admin": admins},
+        "message": (
+            "abonnement désactivé — la ligne est conservée pour le diagnostic"
+            if total
+            else "aucun abonnement actif ne correspond à cet endpoint"
+        ),
+    }
 
 
 # ============================================================

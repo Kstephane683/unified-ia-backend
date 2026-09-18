@@ -297,6 +297,76 @@ class ChatbotPushSubscription(Base):
         return f"<ChatbotPushSubscription(id={self.id}, actif={self.est_actif})>"
 
 
+class PushSubscription(Base):
+    """
+    Abonnement au push navigateur créé par le WIDGET (interface publique).
+
+    POURQUOI UNE SECONDE TABLE D'ABONNEMENTS, ET PAS UNE COLONNE DE PLUS
+    -------------------------------------------------------------------
+    La table `chatbot_push_subscriptions` (tâche 6.5) existe déjà en
+    production et porte les abonnements enregistrés par la route
+    d'administration. `init_db()` appelle `Base.metadata.create_all()`, qui
+    crée les tables ABSENTES et **n'ajoute jamais une colonne** à une table
+    existante : ajouter `conversation_id` ou `date_derniere_utilisation` au
+    modèle de 6.5 aurait donc produit, en production, un modèle annonçant des
+    colonnes que la base n'a pas — et toute lecture de la table serait tombée
+    en erreur. Une table nouvelle, à l'inverse, est créée proprement au boot.
+
+    Les deux tables coexistent : l'ancienne garde les abonnements créés par la
+    route d'administration (rien n'est perdu, rien n'est renommé), la
+    présente porte ceux créés par le widget. L'envoi lit LES DEUX et dédoublonne
+    sur `endpoint` — voir `backend/chatbot/push_abonnements.py`.
+
+    Aucune donnée personnelle n'est stockée ici : ni nom, ni e-mail, ni numéro,
+    ni adresse IP. Un abonnement n'a qu'une identité, son `endpoint`, lisible
+    seulement par le service de push du navigateur concerné. Les deux clés
+    (`keys_p256dh`, `keys_auth`) sont des secrets de chiffrement produits par le
+    navigateur : elles ne sont ni journalisées, ni renvoyées par l'API.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    #: URL du service de push du navigateur. C'est l'IDENTITÉ de l'abonnement :
+    #: unique en base, c'est la clé de rapprochement du réabonnement (un même
+    #: navigateur réabonné met à jour sa ligne au lieu d'en créer une seconde).
+    endpoint = Column(Text, nullable=False, unique=True,
+                      comment='URL du service de push (identifie l\'abonnement)')
+    #: Les deux clés produites par le navigateur (norme Web Push, RFC 8291).
+    #: Sans elles, le message ne peut pas être chiffré et le service de push le
+    #: refuse. Stockées telles quelles, en base64url.
+    keys_p256dh = Column(Text, nullable=False,
+                         comment='Clé publique p256dh du navigateur')
+    keys_auth = Column(Text, nullable=False,
+                       comment='Secret d\'authentification du navigateur')
+
+    #: Contexte, pour le diagnostic et le ciblage. AUCUNE clé étrangère : un
+    #: abonnement ne dépend d'aucune conversation et doit survivre à la purge
+    #: automatique des conversations (12 mois) — une contrainte de clé
+    #: étrangère ferait échouer la purge ou emporterait l'abonnement.
+    conversation_id = Column(String(100), nullable=True, index=True,
+                             comment='Conversation au moment de l\'abonnement')
+    site_id = Column(String(100), nullable=True, index=True, comment='Site concerné')
+    user_agent = Column(Text, nullable=True,
+                        comment='User agent au moment de l\'abonnement')
+
+    #: Désabonnement : la ligne passe à faux, elle n'est JAMAIS supprimée. La
+    #: trace est ce qui permet de diagnostiquer après coup (« ce navigateur
+    #: s'était abonné le 18/09 puis s'est désabonné le 20/09 »), et le
+    #: réabonnement du même endpoint remet simplement ce booléen à vrai.
+    actif = Column(Boolean, default=True, nullable=False, index=True,
+                   comment='Faux après désabonnement — la ligne est conservée')
+
+    date_creation = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                           comment='Premier abonnement (inchangé au réabonnement)')
+    date_derniere_utilisation = Column(
+        TIMESTAMP, nullable=True,
+        comment='Dernière tentative d\'envoi ayant abouti au moins une fois')
+
+    def __repr__(self):
+        return f"<PushSubscription(id={self.id}, actif={self.actif})>"
+
+
 class ChatbotNotificationLog(Base):
     """
     Trace d'un envoi de notification — tâche 6.5.
@@ -355,3 +425,5 @@ Index('idx_leads_site_created', ChatbotLead.site_id, ChatbotLead.created_at)
 Index('idx_analytics_site_type_timestamp', ChatbotAnalytics.site_id, ChatbotAnalytics.event_type, ChatbotAnalytics.timestamp)
 Index('idx_notifications_canal_created', ChatbotNotificationLog.canal, ChatbotNotificationLog.created_at)
 Index('idx_notifications_statut_created', ChatbotNotificationLog.statut, ChatbotNotificationLog.created_at)
+# L'envoi webpush ne demande qu'une chose : les abonnements ACTIFS, par site.
+Index('idx_push_subscriptions_actif_site', PushSubscription.actif, PushSubscription.site_id)

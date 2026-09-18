@@ -32,8 +32,9 @@ from backend.chatbot.models import (
     ChatbotMessage,
     ChatbotNotificationLog,
     ChatbotPushSubscription,
+    PushSubscription,
 )
-from backend.chatbot import notifications
+from backend.chatbot import notifications, push_abonnements
 
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
@@ -660,6 +661,9 @@ async def lister_notifications(
         .all()
     }
 
+    # Abonnements push actifs, les deux sources (P3-PUSH).
+    abonnements_publics, abonnements_admin = push_abonnements.compter_actifs(db)
+
     return {
         "canaux": [etat.pour_api() for etat in notifications.etat_canaux()],
         "notifications": [
@@ -687,10 +691,85 @@ async def lister_notifications(
             "echec": resume.get("echec", 0),
             "non_configure": resume.get("non_configure", 0),
         },
-        "abonnements_push_actifs": db.query(sa_func.count(ChatbotPushSubscription.id))
-        .filter(ChatbotPushSubscription.est_actif.is_(True))
-        .scalar()
-        or 0,
+        "abonnements_push_actifs": abonnements_publics + abonnements_admin,
+        # Détail par source (P3-PUSH) : c'est le chiffre qui dit si le widget
+        # transmet bien ses abonnements. Un total seul ne le dirait pas.
+        "abonnements_push_detail": {
+            "widget": abonnements_publics,
+            "admin": abonnements_admin,
+        },
+    }
+
+
+@router.get("/admin/push/subscriptions")
+async def lister_abonnements_push(
+    actifs_seulement: bool = Query(
+        False,
+        description="Ne garder que les abonnements qui reçoivent encore",
+    ),
+    limit: int = Query(50, ge=1, le=200, description="Nombre de lignes par source"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Lister les abonnements au push navigateur (P3-PUSH).
+
+    Répond à la question que la trace seule ne permet pas de trancher :
+    « les abonnements des visiteurs arrivent-ils, et lesquels reçoivent
+    encore ? ». Les DEUX sources sont listées — `widget` (créés par la route
+    publique, c'est-à-dire par les navigateurs) et `admin` (créés par la route
+    d'administration de la tâche 6.5) — parce que c'est l'ensemble des
+    abonnements qui partiront au prochain envoi.
+
+    Les clés de chiffrement ne sont PAS renvoyées : elles sont inutiles au
+    diagnostic et n'ont aucune raison de sortir de la base. Les endpoints sont
+    tronqués, assez pour rapprocher deux lignes, pas assez pour viser un
+    navigateur.
+    """
+    require_admin(current_user)
+
+    requete_widget = db.query(PushSubscription)
+    requete_admin = db.query(ChatbotPushSubscription)
+    if actifs_seulement:
+        requete_widget = requete_widget.filter(PushSubscription.actif.is_(True))
+        requete_admin = requete_admin.filter(ChatbotPushSubscription.est_actif.is_(True))
+
+    lignes_widget = (
+        requete_widget.order_by(PushSubscription.id.desc()).limit(limit).all()
+    )
+    lignes_admin = (
+        requete_admin.order_by(ChatbotPushSubscription.id.desc()).limit(limit).all()
+    )
+
+    abonnements = [
+        {**push_abonnements.vers_api(ligne), "source": "widget"}
+        for ligne in lignes_widget
+    ]
+    abonnements += [
+        {
+            "id": ligne.id,
+            "endpoint_tronque": push_abonnements.tronquer_endpoint(ligne.endpoint),
+            "conversation_id": None,
+            "site_id": ligne.site_id,
+            "actif": bool(ligne.est_actif),
+            "date_creation": ligne.created_at.isoformat() if ligne.created_at else None,
+            "date_derniere_utilisation": (
+                ligne.derniere_reussite.isoformat() if ligne.derniere_reussite else None
+            ),
+            "user_agent": ligne.user_agent,
+            "source": "admin",
+        }
+        for ligne in lignes_admin
+    ]
+
+    actifs_widget, actifs_admin = push_abonnements.compter_actifs(db)
+    return {
+        "abonnements": abonnements,
+        "resume": {
+            "widget": {"total": len(lignes_widget), "actifs": actifs_widget},
+            "admin": {"total": len(lignes_admin), "actifs": actifs_admin},
+        },
+        "total": len(abonnements),
     }
 
 
@@ -716,13 +795,12 @@ async def envoyer_notification(
 
     # Abonnements actifs, uniquement pour le push : c'est le seul canal dont le
     # destinataire n'est pas une adresse mais un ensemble d'abonnements.
+    # P3-PUSH : les deux tables sont lues et dédoublonnées sur l'endpoint, sinon
+    # les abonnements créés par le widget ne recevraient jamais rien — c'était
+    # exactement le maillon manquant.
     abonnements = None
     if canal == "webpush":
-        abonnements = (
-            db.query(ChatbotPushSubscription)
-            .filter(ChatbotPushSubscription.est_actif.is_(True))
-            .all()
-        )
+        abonnements = push_abonnements.abonnements_actifs(db)
 
     resultat = notifications.envoyer(
         canal=canal,
@@ -731,6 +809,12 @@ async def envoyer_notification(
         message=corps.message,
         abonnements=abonnements,
     )
+
+    # Horodatage de l'utilisation réelle (P3-PUSH) : c'est ce qui permet de
+    # repérer un abonnement qui ne sert plus. Écrit seulement si l'envoi a
+    # abouti au moins une fois, et seulement sur les abonnements du widget.
+    if canal == "webpush" and resultat.succes and abonnements:
+        push_abonnements.marquer_utilisation(db, abonnements)
 
     # Trace dans TOUS les cas. `auteur` = le compte admin qui a déclenché.
     notifications.tracer(

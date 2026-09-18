@@ -63,6 +63,14 @@ _RATE_LIMITS = {
     # et la route est publique — la limite borne l'abus sans gêner une saisie
     # au fil de la frappe (1 requête par seconde en moyenne).
     "/api/chatbot/search": (60, 60),
+    # Abonnement push (P3-PUSH) : route PUBLIQUE qui ÉCRIT en base, sans jeton —
+    # un visiteur n'a pas de compte, il ne peut donc pas s'authentifier. La
+    # limite borne l'insertion en masse ; un navigateur, lui, s'abonne une fois
+    # et ne réessaie qu'après un changement de clés.
+    "/api/chatbot/push/subscribe": (20, 60),
+    # Désabonnement : même logique, et la route n'écrit que si l'endpoint exact
+    # est connu — le seul effet d'un balayage est une lecture sans résultat.
+    "/api/chatbot/push/unsubscribe": (30, 60),
 }
 _rate_bucket: dict = defaultdict(deque)
 
