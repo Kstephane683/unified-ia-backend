@@ -29,6 +29,30 @@ MOTIFS: list[tuple[str, re.Pattern[str]]] = [
     ("cle Google", re.compile(r"\bAIza" + r"[A-Za-z0-9_-]{35}\b")),
     ("jeton Telegram", re.compile(r"\b[0-9]{8,12}:" + r"AA[A-Za-z0-9_-]{30,}")),
     ("cle privee PEM", re.compile(r"-----BEGIN [A-Z ]*" + r"PRIVATE KEY-----")),
+    # Jeton transmis en parametre d'URL ou en en-tete Bearer — les deux formes
+    # sous lesquelles un jeton de production a fuite le 18/09 dans un document
+    # de coordination versionne. Aucun prefixe connu ne l'aurait attrape.
+    ("jeton en parametre d'URL", re.compile(r"[?&](?:key|token|api_key)=[A-Za-z0-9_.\-]{16,}")),
+    ("jeton Bearer", re.compile(r"\bBearer\s+[A-Za-z0-9_.\-]{16,}")),
+    # Famille de jetons du projet ePerformance. Forme sous laquelle un jeton
+    # vivant a fuite en prose (entre accents graves) dans le document de
+    # coordination : aucune regle generique ne peut distinguer un jeton en prose
+    # d'un mot ordinaire, mais la convention de nommage du projet, si.
+    (
+        "jeton du projet ePerformance",
+        re.compile(r"\bep_perf_(?:secret|token|key)[A-Za-z0-9_]{2,}\b"),
+    ),
+    # Jeton affecte a une variable dont le nom annonce un secret. Le filtre de
+    # gabarit (voir est_un_gabarit) evite les faux positifs du type
+    # "api_key": "xkeysib-YOUR_BREVO_KEY".
+    (
+        "secret affecte a une variable",
+        re.compile(
+            r"(?:token|api[_-]?key|apikey|secret|mot[_-]?de[_-]?passe|password)"
+            r"[\"']?\s*[:=]\s*[\"'][A-Za-z0-9_.\-]{20,}[\"']",
+            re.IGNORECASE,
+        ),
+    ),
     # Mot de passe dans une URL de connexion. On exclut les hotes locaux et les
     # mots de passe courts : ce sont des identifiants de developpement, pas des
     # secrets — un garde-fou qui crie au loup finit par etre contourne.
@@ -37,6 +61,19 @@ MOTIFS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(r"://[^/\s:@]+:[^/\s:@]{8,}@(?!(?:localhost|127\.0\.0\.1)\b)"),
     ),
 ]
+
+# Marqueurs de gabarit. Un secret reel est aleatoire : il ne contient pas ces
+# mots. On ne les applique qu'a la valeur detectee, jamais au fichier entier.
+GABARITS = (
+    "YOUR", "VOTRE", "XXXX", "CHANGEME", "CHANGE_ME", "PLACEHOLDER", "EXAMPLE",
+    "TODO", "REMPLACER", "A_REMPLACER", "DUMMY", "FAKE", "SAMPLE",
+)
+
+
+def est_un_gabarit(valeur: str) -> bool:
+    """Vrai si la valeur detectee est un exemple et non un secret."""
+    majuscules = valeur.upper()
+    return any(marqueur in majuscules for marqueur in GABARITS)
 
 # Fichiers ou un motif est legitime (documentation, exemples, ce script).
 EXCLUSIONS = {
@@ -81,7 +118,10 @@ def analyser(chemin: str) -> list[tuple[int, str, str]]:
     for numero, ligne in enumerate(contenu.splitlines(), 1):
         for nom, motif in MOTIFS:
             for correspondance in motif.finditer(ligne):
-                trouves.append((numero, nom, masquer(correspondance.group(0))))
+                valeur = correspondance.group(0)
+                if est_un_gabarit(valeur):
+                    continue
+                trouves.append((numero, nom, masquer(valeur)))
     return trouves
 
 
