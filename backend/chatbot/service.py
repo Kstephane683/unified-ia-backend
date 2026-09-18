@@ -14,6 +14,7 @@ Pipeline :
 from typing import Dict, Optional, List
 from sqlalchemy.orm import Session
 from datetime import datetime
+import re
 import uuid
 import time
 
@@ -27,6 +28,29 @@ from .models import (
     ChatbotMessage,
     ChatbotAnalytics
 )
+
+
+# ============================================================
+# INTENT EXPLICITE DU WIDGET — tâche 6.3-BIS A.8
+#
+# Le widget envoie `[intent:<nom>] <libellé>` quand le visiteur clique une
+# suggestion de l'accueil ou une capacité de l'onglet Aide. Le préfixe est :
+#   · RETIRÉ du texte affiché et du texte enregistré (le visiteur ne doit
+#     jamais voir cette notation technique) ;
+#   · RETIRÉ du texte envoyé au LLM (Mia répond au libellé, pas à une balise) ;
+#   · utilisé UNIQUEMENT ici pour choisir l'agent — le mapping intent → agent
+#     vit dans `AgentRouter` et n'est jamais exposé au front.
+# ============================================================
+
+MOTIF_INTENT_EXPLICITE = re.compile(r'^\s*\[intent:([a-z0-9_]+)\]\s*', re.IGNORECASE)
+
+
+def extraire_intent_explicite(message: str):
+    """(intent, message nettoyé) — intent vaut None si aucun préfixe."""
+    correspondance = MOTIF_INTENT_EXPLICITE.match(message or '')
+    if not correspondance:
+        return None, message
+    return correspondance.group(1).lower(), (message or '')[correspondance.end():].strip()
 
 
 class ChatbotService:
@@ -77,7 +101,8 @@ class ChatbotService:
         conversation_id: Optional[str] = None,
         user_id: Optional[int] = None,
         visitor_info: Optional[Dict] = None,
-        message_history: Optional[List[Dict]] = None
+        message_history: Optional[List[Dict]] = None,
+        image: Optional[Dict] = None
     ) -> Dict:
         """
         Traiter un message utilisateur (pipeline complet)
@@ -89,6 +114,7 @@ class ChatbotService:
             user_id: ID utilisateur si connecté
             visitor_info: Infos visiteur (browser, IP, etc.)
             message_history: Historique fourni par le client
+            image: Image normalisée (vision.preparer_image) — optionnelle (A.1)
         
         Returns:
             {
@@ -103,6 +129,15 @@ class ChatbotService:
             }
         """
         start_time = time.time()
+        
+        # Intent explicite du widget (clic sur une suggestion) — A.8.
+        # Il est extrait AVANT toute écriture : ni la base ni le LLM ne voient
+        # la notation `[intent:…]`.
+        intent_explicite, message = extraire_intent_explicite(message)
+        if not (message or '').strip():
+            # Clic sur une suggestion dont le libellé manquerait : on garde le
+            # libellé d'origine plutôt que d'envoyer un message vide au LLM.
+            message = (message or '').strip() or 'Bonjour'
         
         # Générer conversation_id si nouvelle conversation
         if not conversation_id:
@@ -159,10 +194,21 @@ class ChatbotService:
             )
             
             # 4. Detect intent
-            intent, intent_confidence, intent_metadata = self.intent_detector.detect(
-                message=message,
-                context=context
-            )
+            # Un intent explicite (clic sur une suggestion du widget) prime sur
+            # la détection par mots-clés : le visiteur a dit ce qu'il voulait.
+            if intent_explicite:
+                intent = intent_explicite
+                intent_confidence = 1.0
+                intent_metadata = {
+                    'method': 'widget_suggestion',
+                    'source': 'suggestion_click',
+                    'timestamp': datetime.utcnow().isoformat(),
+                }
+            else:
+                intent, intent_confidence, intent_metadata = self.intent_detector.detect(
+                    message=message,
+                    context=context
+                )
             
             # 5. Route to agent (Phase 1-J3)
             agent_key, agent_metadata = self.agent_router.route(
@@ -183,7 +229,8 @@ class ChatbotService:
                 message=message,
                 context=context,
                 intent=intent,
-                intent_metadata=intent_metadata
+                intent_metadata=intent_metadata,
+                image=image
             )
             
             # 7. Detect and execute actions (Phase 1-J3)
@@ -236,10 +283,36 @@ class ChatbotService:
                 event_data={
                     'intent': intent,
                     'intent_confidence': intent_confidence,
-                    'is_new_conversation': is_new_conversation
+                    'is_new_conversation': is_new_conversation,
+                    'image_jointe': image is not None,
                 },
                 visitor_info=visitor_info
             )
+
+            # 10bis. Clic sur une suggestion (A.8) — donnée commerciale.
+            # Le widget joint `visitor_info.suggestion_click`
+            # {suggestion_id, intent, label, timestamp, session_id}. On
+            # l'enregistre comme événement dédié : c'est lui qui dira quelles
+            # capacités intéressent réellement les visiteurs.
+            clic = (visitor_info or {}).get('suggestion_click')
+            if isinstance(clic, dict) and clic:
+                self._track_event(
+                    site_id=site_id,
+                    conversation_id=conversation_id,
+                    event_type='suggestion_click',
+                    event_category='engagement',
+                    event_data={
+                        'suggestion_id': clic.get('suggestion_id'),
+                        'intent': clic.get('intent') or intent_explicite,
+                        'label': clic.get('label'),
+                        'client_timestamp': clic.get('timestamp'),
+                        'session_id': clic.get('session_id'),
+                        # Ce que le backend en a fait — la preuve que le clic
+                        # est bien allé jusqu'à la réponse, pas seulement reçu.
+                        'agent_used': agent_used,
+                    },
+                    visitor_info=visitor_info
+                )
             
             # Calculer le temps de traitement
             processing_time_ms = int((time.time() - start_time) * 1000)
@@ -413,7 +486,14 @@ class ChatbotService:
         )
     
     def _generate_suggestions(self, intent: str) -> List[str]:
-        """Générer des suggestions de réponse rapide"""
+        """
+        Suggestions de réponse rapide (boutons natifs du widget).
+
+        Les neuf intents d'A.8 ont leurs propres suites : après une réponse qui
+        démontre une compétence, proposer l'étape suivante de CETTE compétence
+        fait avancer la conversation — « En savoir plus / Parler à un
+        conseiller » y serait un repli, pas une suite.
+        """
         suggestions_map = {
             'diagnostic_request': [
                 "Faire un diagnostic gratuit",
@@ -436,7 +516,44 @@ class ChatbotService:
                 "Faire un diagnostic",
                 "Voir nos services",
                 "Contacter un conseiller"
-            ]
+            ],
+            # ---- Les neuf capacités (A.8) : suites de la compétence ----
+            'clients': [
+                "Par où commencer cette semaine ?",
+                "Faire un diagnostic de mon acquisition"
+            ],
+            'mlm': [
+                "Comment structurer mon recrutement ?",
+                "Automatiser le suivi de mes contacts"
+            ],
+            'ventes': [
+                "Où je perds le plus de ventes ?",
+                "Améliorer mon offre d'entrée"
+            ],
+            'site_web': [
+                "Que mettre sur mon premier écran ?",
+                "Faire un diagnostic de mon site actuel"
+            ],
+            'seo': [
+                "Quels mots-clés viser d'abord ?",
+                "Être cité par les IA (ChatGPT, Google)"
+            ],
+            'ads': [
+                "Quel budget pour démarrer ?",
+                "Améliorer mon offre avant de payer"
+            ],
+            'social': [
+                "Quel rythme de publication tenir ?",
+                "Quels formats fonctionnent en Afrique de l'Ouest ?"
+            ],
+            'ia_auto': [
+                "Quelle tâche automatiser en premier ?",
+                "Répondre aux prospects automatiquement"
+            ],
+            'funnel': [
+                "Quelle étape perd le plus ?",
+                "Faire un diagnostic de mon tunnel"
+            ],
         }
         
         return suggestions_map.get(intent, [

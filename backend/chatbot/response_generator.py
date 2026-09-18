@@ -11,7 +11,13 @@ Pipeline :
 from typing import Dict, Optional, List, Tuple
 from pathlib import Path
 import re
+import sys
 import time
+
+# Budget de la description d'image (A.1) : 2 à 3 phrases suffisent, et le
+# plafond garde la facture prévisible. Le budget IMAGE lui-même (≤ 512 px ⇒
+# ≤ 255 tokens en `detail:"auto"`, ≤ 85 en `low`) est borné par vision.py.
+VISION_MAX_TOKENS = 400
 
 # Import LLM Client unifié
 try:
@@ -63,7 +69,8 @@ class ResponseGenerator:
         message: str,
         context: Dict,
         intent: str,
-        intent_metadata: Optional[Dict] = None
+        intent_metadata: Optional[Dict] = None,
+        image: Optional[Dict] = None
     ) -> Tuple[str, Dict]:
         """
         Générer une réponse avec le persona de l'agent
@@ -75,6 +82,7 @@ class ResponseGenerator:
             context: Context complet (historique, user, etc.)
             intent: Intent détecté
             intent_metadata: Métadonnées de l'intent
+            image: Image normalisée par `vision.preparer_image` (tâche A.1) ou None
         
         Returns:
             (response_text, generation_metadata)
@@ -82,6 +90,15 @@ class ResponseGenerator:
             - generation_metadata: Infos sur la génération (provider, tokens, etc.)
         """
         start_time = time.time()
+        
+        # 0. Image jointe (A.1) : appel de description DÉDIÉ.
+        #    Le prompt minimal de ce premier appel est ce qui garantit que
+        #    l'image est réellement lue (mesures dans `_get_vision_instructions`).
+        #    Si l'appel échoue, on retombe sur le chemin multimodal direct :
+        #    mieux vaut une chance de lecture qu'aucune.
+        observation_image = None
+        if image is not None:
+            observation_image = await self._decrire_image(image)
         
         # 1. Charger le persona de l'agent
         agent_persona = self._load_agent_persona(agent_key, agent_metadata.get('agent_path'))
@@ -91,14 +108,17 @@ class ResponseGenerator:
             agent_persona=agent_persona,
             context=context,
             intent=intent,
-            agent_key=agent_key
+            agent_key=agent_key,
+            has_image=image is not None
         )
         
         # 3. Construire l'historique de messages pour le LLM
         messages = self._build_messages_history(
             system_prompt=system_prompt,
             message=message,
-            context=context
+            context=context,
+            image=image,
+            observation_image=observation_image
         )
         
         # 4. Appeler le LLM avec fallback
@@ -119,7 +139,8 @@ class ResponseGenerator:
             'llm_tokens_used': tokens_used,
             'generation_time_ms': generation_time_ms,
             'system_prompt_length': len(system_prompt),
-            'persona_loaded': agent_persona is not None
+            'persona_loaded': agent_persona is not None,
+            'image_jointe': image is not None
         }
         
         return response_text, generation_metadata
@@ -139,9 +160,19 @@ class ResponseGenerator:
         if agent_path and Path(agent_path).exists():
             persona_file = Path(agent_path)
         else:
-            # Chercher dans toutes les catégories
+            # Chercher dans toutes les catégories présentes sur le disque.
+            # NB (tâche 6.3-BIS) : la liste était écrite en dur et omettait
+            # `support/` — le persona de l'agent support n'était donc jamais
+            # chargé, et le LLM répondait sans expertise sur ce sujet.
             persona_file = None
-            for category in ['sales', 'marketing', 'design', 'research', 'product']:
+            categories = ['sales', 'marketing', 'design', 'research', 'product', 'support']
+            try:
+                categories = sorted(
+                    d.name for d in self.agents_base_path.iterdir() if d.is_dir()
+                ) or categories
+            except OSError:
+                pass
+            for category in categories:
                 candidate = self.agents_base_path / category / f"{agent_key}.md"
                 if candidate.exists():
                     persona_file = candidate
@@ -165,52 +196,204 @@ class ResponseGenerator:
         agent_persona: Optional[str],
         context: Dict,
         intent: str,
-        agent_key: str
+        agent_key: str,
+        has_image: bool = False
     ) -> str:
         """
         Construire le system prompt enrichi
         
         Structure :
-        1. Persona de l'agent (Markdown complet)
-        2. Context ePerformance (offres, tarifs, clients types)
-        3. Context utilisateur (profil, historique, diagnostics)
-        4. Instructions spécifiques à l'intent
-        5. Contraintes (ton, longueur, format)
+        1. Identité visible (règle A.6 — un seul nom : Mia)
+        2. Persona de l'agent (expertise interne, jamais nommée)
+        3. Context ePerformance (offres, tarifs, clients types)
+        4. Context utilisateur (profil, historique, diagnostics)
+        5. Instructions spécifiques à l'intent (principes, pas de canevas)
+        6. Contraintes (ton, longueur, format)
+        7. Cadre vision si une image accompagne le message (A.1)
         """
         prompt_parts = []
         
-        # 1. Persona de l'agent
+        # 1. Identité visible — AVANT le persona : la règle qui prime sur tout
+        prompt_parts.append(self._get_identity_block())
+        
+        # 2. Persona de l'agent
         if agent_persona:
-            prompt_parts.append("# VOTRE IDENTITÉ ET EXPERTISE\n")
+            prompt_parts.append("# VOTRE EXPERTISE DU MOMENT (INTERNE)\n")
             prompt_parts.append(agent_persona)
             prompt_parts.append("\n---\n")
         else:
             # Fallback si persona non chargé
-            prompt_parts.append(f"# AGENT : {agent_key}\n")
-            prompt_parts.append("Vous êtes un assistant expert ePerformance.\n\n")
+            prompt_parts.append("# EXPERTISE DU MOMENT (INTERNE)\n")
+            prompt_parts.append("Vous avez une expertise générale ePerformance.\n\n")
         
-        # 2. Context ePerformance (offres produits)
+        # 3. Context ePerformance (offres produits)
         prompt_parts.append(self._get_eperformance_context())
         
-        # 3. Context utilisateur
+        # 4. Context utilisateur
         user_context = self._format_user_context(context)
         if user_context:
             prompt_parts.append("\n# CONTEXT UTILISATEUR\n")
             prompt_parts.append(user_context)
             prompt_parts.append("\n")
         
-        # 4. Instructions spécifiques à l'intent
+        # 5. Instructions spécifiques à l'intent
         intent_instructions = self._get_intent_instructions(intent)
         if intent_instructions:
-            prompt_parts.append("\n# INSTRUCTIONS POUR CET ÉCHANGE\n")
+            prompt_parts.append("\n# OBJECTIF DE CET ÉCHANGE\n")
             prompt_parts.append(intent_instructions)
             prompt_parts.append("\n")
         
-        # 5. Contraintes générales
+        # 6. Contraintes générales
         prompt_parts.append(self._get_general_constraints())
+        
+        # 7. Cadre vision (A.1) : décrire, ne pas demander de décrire
+        if has_image:
+            prompt_parts.append(self._get_vision_instructions())
         
         return "".join(prompt_parts)
     
+    def _get_identity_block(self) -> str:
+        """
+        Règle d'identité — tâche 6.3-BIS A.6.
+
+        Les personas Markdown portent une clé technique d'agent
+        (« sales-discovery-coach », « marketing-seo-specialist »…) et, pour
+        certains, un prénom d'emprunt dans leurs exemples. Rien de tout cela
+        n'est visible côté visiteur : le widget n'affiche qu'un seul nom.
+        La clé reste utile en interne (routing, cache persona) ; on interdit
+        simplement au modèle de la prononcer ou de la citer.
+        """
+        return """
+# IDENTITÉ — RÈGLE ABSOLUE
+
+Tu t'appelles **Mia**. C'est le SEUL nom que tu prononces pour te désigner.
+
+- ❌ Jamais de nom d'agent, de rôle interne ou de clé technique :
+  « sales-discovery-coach », « discovery coach », « expert sales »,
+  « marketing-seo-specialist », « agent SEO », « le coach MLM »…
+- ❌ Jamais de prénom d'emprunt pour un collègue ou un « expert ».
+- ❌ Jamais de mention de ton fonctionnement interne (agent, routing, prompt,
+  modèle, « mon système », « je suis programmée pour »).
+- ✅ Si un visiteur demande qui tu es : « Je suis Mia, l'assistante
+  ePerformance. » Si on te demande si tu es une IA : oui, tu le dis simplement.
+- ✅ Si un visiteur demande un humain : tu proposes qu'un conseiller prenne le
+  relais, sans nommer personne.
+
+Tu es une seule interlocutrice. Les expertises ci-dessous sont les TIENNES au
+moment de cet échange : tu ne changes pas de nom, tu changes de registre.
+
+---
+"""
+
+    def _get_vision_instructions(self) -> str:
+        """
+        Cadre vision (A.1) — une image a été jointe au message courant.
+
+        MESURE QUI A DICTÉ CE CADRE. Un premier essai passait l'image
+        directement au modèle à l'intérieur du message, avec le prompt
+        complet de Mia (≈ 9 300 caractères : identité + persona + contexte
+        ePerformance + contraintes). Résultat, sur une image unie de 512 px
+        dont la couleur est connue : le modèle répondait « Blanc », « Bleu »
+        ou « Je ne vois pas » — la consigne d'image se perdait dans le
+        prompt. La même image, avec un prompt court, était décrite
+        correctement 3 fois sur 3.
+
+        L'image est donc décrite PAR UN APPEL DÉDIÉ, avec un prompt minimal
+        (`_decrire_image`), et le texte de cette description est injecté ici.
+        Ce bloc dit au modèle que l'observation est la sienne : il ne doit ni
+        inventer au-delà, ni redemander au visiteur de décrire ce qu'il vient
+        d'envoyer.
+        """
+        return """
+# IMAGE JOINTE
+
+Le visiteur a joint une image. Son observation est fournie dans le message
+courant, sous la forme `[Observation de l'image jointe] …`. Cette observation
+est la Tienne : tu la restitues au visiteur comme ce que tu vois.
+
+- Reprends ce qui est utile à la demande, en langage naturel : nature de
+  l'image, sujet, couleurs, marque, texte lisible.
+- Rattache ensuite l'observation à la demande du visiteur : s'il a posé une
+  question, réponds à SA question en t'appuyant sur l'observation.
+- Si un texte est lisible, cite-le.
+- ⛔ Ne demande JAMAIS au visiteur de décrire l'image qu'il vient d'envoyer
+  (« peux-tu me décrire cette image ? », « de quoi s'agit-il ? »).
+- Si l'observation dit que l'image est illisible, floue ou vide : dis-le en
+  une phrase et propose de reformuler ou d'envoyer une autre image.
+- N'invente RIEN qui ne soit pas dans l'observation ou dans le message du
+  visiteur : ce serait une hallucination sur un document qu'il connaît.
+- Ne recopie pas la mention technique `[Observation de l'image jointe]` :
+  parle normalement.
+
+---
+"""
+
+    async def _decrire_image(self, image: Dict) -> Optional[str]:
+        """
+        Appel dédié à la description d'une image (A.1).
+
+        Pourquoi un appel séparé plutôt que l'image dans le message : mesuré
+        sur ce dépôt, le prompt complet de Mia (≈ 9 300 car.) fait perdre au
+        modèle la lecture de l'image (couleur fausse ou « je ne vois pas »),
+        alors qu'un prompt minimal la lit correctement. Voir
+        `_get_vision_instructions`.
+
+        Coût : l'image (≤ 512 px ⇒ ≤ 255 tokens en `detail:"auto"`) plus une
+        description courte plafonnée à `VISION_MAX_TOKENS`. L'image est
+        envoyée en `detail:"auto"` — le plafond de dimension de `vision.py`
+        est ce qui borne réellement la facture.
+
+        Returns:
+            La description, ou None si l'appel échoue (l'appelant retombe
+            alors sur le chemin multimodal direct).
+        """
+        if not self.llm_client or not image:
+            return None
+        try:
+            from .vision import bloc_vision
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu décris des images, factuellement, pour un assistant "
+                        "commercial francophone. Tu ne discutes pas, tu ne "
+                        "conseilles pas : tu observes."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Décris cette image avec précision, en 2 à 3 phrases : "
+                                "nature de l'image (photo, capture d'écran, visuel "
+                                "publicitaire, document…), sujet, couleurs dominantes, "
+                                "texte lisible (cite-le), marque ou logo visible. "
+                                "N'interprète pas, ne conseille pas. Si l'image est "
+                                "illisible ou vide, dis-le simplement."
+                            ),
+                        },
+                        # `high` : mesuré plus fiable que `auto` sur les petites
+                        # images, et borné à ≤ 255 tokens par le plafond de
+                        # 512 px (vision.MAX_DIMENSION).
+                        bloc_vision(image, detail="high"),
+                    ],
+                },
+            ]
+            result = await self.llm_client.chat_completion(
+                provider=None,
+                messages=messages,
+                max_tokens=VISION_MAX_TOKENS,
+                temperature=0.2,
+            )
+            texte = (result or {}).get("content", "").strip()
+            return texte or None
+        except Exception as exc:  # pragma: no cover - dépend du réseau
+            print(f"⚠️  Description d'image impossible: {exc}", file=sys.stderr)
+            return None
+
     def _get_business_context(self, context: Dict) -> str:
         """
         Context métier dynamique selon le site_id
@@ -341,95 +524,209 @@ ePerformance est une agence spécialisée en marketing digital et systèmes d'ac
     
     def _get_intent_instructions(self, intent: str) -> str:
         """
-        Instructions spécifiques selon l'intent
+        Objectif de l'échange selon l'intent — des PRINCIPES, pas un canevas.
+
+        Tâche 6.3-BIS A.5 : les entrées de cette table étaient des scripts
+        (listes de questions à poser dans l'ordre, étapes numérotées à
+        réciter). Mia est un agent conversationnel, pas un scénario : un
+        visiteur qui écrit « Bonjour » recevait une liste de questions figée.
+        Chaque entrée dit désormais CE QU'IL FAUT OBTENIR et à quoi ressemble
+        une réponse de qualité — la formulation, l'ordre et le nombre de
+        questions restent à l'appréciation du modèle, selon ce que le visiteur
+        a déjà dit.
+
+        Les neuf intents `intent:…` (A.8) ont leur propre entrée : ils sont
+        déclenchés par un clic sur une suggestion, donc le visiteur demande
+        explicitement cette compétence — la réponse doit la DÉMONTRER.
         """
         instructions = {
+            # ---- Intents historiques (reformulés en principes) ----
             'diagnostic_request': """
-Objectif : Collecter les données pour un diagnostic complet (CAC, LTV, conversion).
-Posez 3-4 questions SPIN maximum pour obtenir :
-- Budget publicitaire mensuel
-- Nombre de clients acquis/mois
-- Processus de conversion actuel
-Proposez ensuite de générer le diagnostic gratuit.
+Le visiteur veut un diagnostic de son acquisition.
+Objectif : réunir de quoi poser un diagnostic chiffré (ce qu'il investit,
+ce qu'il obtient, où ça bloque) et le dire clairement.
+Une bonne réponse fait avancer la compréhension : elle peut poser une
+question, relever une incohérence déjà visible, ou proposer le diagnostic
+gratuit quand les éléments sont suffisants. Elle n'énumère pas un
+questionnaire.
 """,
             'product_inquiry': """
-Objectif : Comprendre le besoin précis et recommander l'offre adaptée.
-Questions à poser :
-- Quel est votre objectif principal ? (leads, ventes, visibilité)
-- Avez-vous déjà un site web ?
-- Budget approximatif ?
-Recommandez Pack Découverte (100k) si budget limité, ou diagnostic gratuit d'abord.
+Le visiteur veut comprendre une offre.
+Objectif : nommer la solution la plus probablement adaptée et dire en quoi
+elle répond à ce qu'il a décrit ; poser une question seulement si la
+réponse change vraiment la recommandation.
 """,
             'order_intent': """
-Objectif : Capturer le lead IMMÉDIATEMENT (lead chaud !).
-1. Confirmer l'intérêt et l'offre concernée
-2. Demander : Nom, Téléphone, Email
-3. Proposer un créneau d'appel sous 24h
-4. Remercier et confirmer la prise de contact
-⚠️ Déclencher ACTION : lead_capture + notification_telegram CRITICAL
+Le visiteur est chaud : il veut avancer.
+Objectif : confirmer ce qu'il veut, recueillir les coordonnées utiles pour le
+rappeler (nom, téléphone ou WhatsApp), et annoncer la suite concrètement.
+Ne pas noyer ce moment dans des questions de qualification : c'est le bon
+moment de passer la main si nécessaire.
 """,
             'objection_handling': """
-Objectif : Comprendre l'objection réelle et la traiter avec empathie.
-Framework :
-1. Écouter et reformuler l'objection
-2. Isoler : "Si ce n'était que ça, vous seriez prêt ?"
-3. Répondre avec preuve sociale ou garantie
-4. Tester la fermeture
+Le visiteur hésite, doute ou a déjà été déçu.
+Objectif : comprendre la vraie réserve derrière les mots, y répondre avec
+des éléments vérifiables (résultats, garanties, périmètre) et laisser le
+visiteur trancher. Jamais de pression, jamais de dénigrement.
 """,
             'mlm_advice': """
-Objectif : Positionner ePerformance comme LA solution MLM.
-Points clés :
-- 80% de nos clients sont MLM (Longrich majoritairement)
-- Système automatisé = 70% de prospects en plus
-- Résultats : 47 leads qualifiés/mois (moyenne 3 clients récents)
-Proposer diagnostic gratuit pour personnaliser la stratégie.
-"""
+Le visiteur est en marketing de réseau / parrainage.
+Objectif : répondre à sa question avec la réalité du terrain (recrutement,
+tunnel de filleules, contenu, automatisation) et des exemples concrets.
+""",
+            'technical_seo': """
+Le visiteur veut être visible sur les moteurs et les IA.
+Objectif : une recommandation actionnable (structure, intention de recherche,
+contenu, technique) — pas un cours général sur le SEO.
+""",
+            'content_strategy': """
+Le visiteur veut publier mieux.
+Objectif : un angle concret, adapté à sa plateforme et à ses moyens, avec
+un exemple exploitable plutôt qu'un calendrier théorique.
+""",
+            'growth_hacking': """
+Le visiteur cherche à accélérer son acquisition.
+Objectif : identifier le levier le plus rentable pour SA situation et
+proposer un test mesurable.
+""",
+            'ia_trends': """
+Le visiteur s'intéresse à l'IA et à l'automatisation.
+Objectif : traduire le sujet en usage concret pour son activité, avec ce que
+ça change en temps ou en argent. Pas de veille abstraite.
+""",
+            'pricing_question': """
+Le visiteur demande un prix.
+Objectif : donner un ordre de grandeur honnête et la condition qui le fait
+varier, puis proposer l'étape qui permet de chiffrer juste (diagnostic,
+échange court). On ne cache pas les prix derrière un rendez-vous.
+""",
+            'support_question': """
+Le visiteur est bloqué ou demande de l'aide.
+Objectif : résoudre, ou dire précisément ce qui va se passer ensuite
+(qui le rappelle, sous quel délai).
+""",
+
+            # ---- Les neuf capacités des suggestions (A.8) ----
+            'clients': """
+Le visiteur veut plus de clients.
+Compétence à démontrer : acquisition. Propose un angle d'acquisition adapté à
+son activité (canal, offre d'entrée, preuve) et le premier pas concret.
+Montre que tu sais d'où viennent les clients avant de parler d'outils.
+""",
+            'mlm': """
+Le visiteur veut développer son réseau / son parrainage.
+Compétence à démontrer : recrutement et duplication. Parle du parcours du
+prospect (où il te découvre, ce qu'il comprend, ce qu'il fait ensuite) et de
+ce qui fait recruter sans forcer. Demande le nom du réseau ou de la marque
+seulement si ça change la réponse.
+""",
+            'ventes': """
+Le visiteur veut améliorer ses ventes.
+Compétence à démontrer : conversion. Regarde le parcours de décision :
+ce que voit le prospect, ce qu'il comprend, ce qui le fait hésiter, ce qui
+déclenche l'achat. Propose une amélioration mesurable, pas une liste de
+tactiques.
+""",
+            'site_web': """
+Le visiteur veut un site qui convertit.
+Compétence à démontrer : conception orientée conversion. Parle de la
+structure du premier écran, de la promesse, du chemin vers l'action et de la
+preuve. Demande son activité pour rendre le conseil précis.
+""",
+            'seo': """
+Le visiteur veut améliorer son référencement.
+Compétence à démontrer : visibilité organique — et citation par les IA.
+Distingue ce qui se corrige techniquement de ce qui se gagne par le contenu.
+Un exemple de requête visée rend le conseil immédiatement utile.
+""",
+            'ads': """
+Le visiteur veut lancer de la publicité.
+Compétence à démontrer : acquisition payante rentable. Parle du budget de
+départ, de l'offre mise en avant et de la mesure (coût par lead, coût par
+vente). Alerte sur ce qui fait échouer une campagne : une offre faible, pas
+un réglage.
+""",
+            'social': """
+Le visiteur veut gérer ses réseaux sociaux.
+Compétence à démontrer : contenu et communauté. Propose une ligne éditoriale
+tenable (rythme, formats, sujets) et ce qui produit des messages entrants,
+plutôt qu'une théorie des algorithmes.
+""",
+            'ia_auto': """
+Le visiteur veut exploiter l'IA et l'automatisation.
+Compétence à démontrer : automatisation utile. Identifie la tâche répétitive
+qui coûte le plus (réponse aux prospects, relance, publication, reporting),
+et décris ce qui peut être automatisé sans perdre la relation humaine.
+""",
+            'funnel': """
+Le visiteur veut optimiser son tunnel de conversion.
+Compétence à démontrer : lecture d'un entonnoir. Fais nommer l'étape qui
+perd le plus (visiteurs → contacts → rendez-vous → ventes) et attaque
+celle-là. Dire où fuit le volume vaut mieux que d'optimiser partout.
+""",
         }
         
         return instructions.get(intent, "")
     
     def _get_general_constraints(self) -> str:
         """
-        Contraintes générales (ton, format, longueur)
+        Contraintes générales (ton, format, longueur).
+
+        Tâche 6.3-BIS A.5 : la version précédente imposait une STRUCTURE
+        (« Bullets points si liste », « Appel à l'action clair à la fin de
+        chaque réponse », « Proposer le diagnostic gratuit » en priorité 2) et
+        interdisait « les réponses génériques » tout en produisant
+        mécaniquement ce type de réponse. Le résultat mesuré en production :
+        un premier message en liste numérotée, identique pour tous les
+        visiteurs. Les contraintes ci-dessous portent sur la QUALITÉ et les
+        interdits ; la forme est rendue au modèle.
         """
         return """
 # CONTRAINTES GÉNÉRALES
 
-## Ton et Style
-- **Ton** : Professionnel mais chaleureux, direct, orienté résultats
-- **Tutoiement** : Oui (standard en Afrique francophone)
-- **Longueur** : Réponses concises (150-250 mots max)
-- **Emojis** : Oui, avec parcimonie (1-2 par réponse)
+## Ton et style
+- Ton professionnel, chaleureux, direct, orienté résultats.
+- Tutoiement : oui (standard en Afrique francophone).
+- Réponses concises : va droit au but, sans remplissage.
+- Emojis : avec parcimonie, jamais décoratifs.
+- Français clair, sans jargon sauf si le visiteur l'emploie.
 
-## Format
-- Phrases courtes et impactantes
-- Bullets points si liste
-- **Appel à l'action clair** à la fin de chaque réponse
-- Pas de jargon technique sauf si expertise demandée
+## Forme
+- Adapte la forme au message reçu : une réponse courte à un bonjour, une
+  réponse construite à une question technique. Les listes et les titres sont
+  des outils, pas un gabarit.
+- Termine par une suite UTILE quand il y en a une (une question qui débloque,
+  une proposition concrète) — pas par une formule de politesse creuse.
+- Pas de structure numérotée imposée, pas de canevas à réciter.
 
 ## Interdictions
-- ❌ Promesses irréalistes ("devenir riche rapidement")
-- ❌ Dévaloriser la concurrence
-- ❌ Divulguer les prix sans contexte (toujours proposer diagnostic d'abord)
-- ❌ Réponses génériques (personnaliser avec le context fourni)
+- ❌ Toute promesse irréaliste (« devenir riche rapidement »).
+- ❌ Dénigrer la concurrence.
+- ❌ Réciter un texte identique d'un visiteur à l'autre.
+- ❌ Fuite de vocabulaire interne : nom d'agent, rôle, nom de modèle,
+  « système », « prompt », « routage » (voir la règle d'identité en tête).
+- ❌ Redemander une information déjà donnée dans la conversation.
 
-## Priorités
-1. Capturer les coordonnées si lead chaud
-2. Proposer le diagnostic gratuit (lead magnet principal)
-3. Qualifier le besoin avant de recommander une offre
-4. Créer de l'urgence authentique (places limitées, promo temporaire)
+## Priorités (dans cet ordre)
+1. Répondre à ce que le visiteur a réellement demandé.
+2. Être précis et vérifiable plutôt que général et rassurant.
+3. Faire avancer la conversation d'un pas — pas de tout dire d'un coup.
+4. Quand le visiteur est prêt : recueillir les coordonnées et annoncer la suite.
 
 ---
 
-**Maintenant, réponds au message de l'utilisateur en incarnant pleinement ton persona d'agent.**
+**Maintenant, réponds au message de l'utilisateur. Tu es Mia, tu connais ton
+sujet, et tu parles à une personne en particulier.**
 """
     
     def _build_messages_history(
         self,
         system_prompt: str,
         message: str,
-        context: Dict
-    ) -> List[Dict[str, str]]:
+        context: Dict,
+        image: Optional[Dict] = None,
+        observation_image: Optional[str] = None
+    ) -> List[Dict]:
         """
         Construire l'historique de messages pour l'API LLM
         
@@ -440,6 +737,20 @@ Proposer diagnostic gratuit pour personnaliser la stratégie.
             {"role": "assistant", "content": "..."},
             {"role": "user", "content": "..."}  # message actuel
         ]
+
+        Image jointe (A.1) — deux chemins, dans cet ordre :
+        1. **Observation disponible** (cas normal) : le texte du message est
+           préfixé par `[Observation de l'image jointe] …`, produite par
+           l'appel dédié `_decrire_image`. L'image n'est PAS renvoyée dans
+           l'historique : elle a déjà été lue, et la renvoyer ne ferait
+           qu'ajouter des tokens de prompt sans changer la réponse.
+        2. **Observation indisponible** (échec du premier appel) : repli sur
+           le contenu multi-parties OpenAI, avec l'image dans le message
+           courant — la seule chance restante que le modèle la voie.
+
+        Dans les deux cas, un seul message porte l'image : les images des tours
+        précédents ne sont pas conservées (elles ne sont pas stockées en base,
+        et rejouer un historique d'images multiplierait la facture).
         """
         messages = [
             {"role": "system", "content": system_prompt}
@@ -457,10 +768,46 @@ Proposer diagnostic gratuit pour personnaliser la stratégie.
             if content:
                 messages.append({"role": role, "content": content})
         
-        # Ajouter le message actuel
-        messages.append({"role": "user", "content": message})
+        # Message courant
+        if image and observation_image:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": self._message_avec_observation(message, observation_image),
+                }
+            )
+        elif image:
+            from .vision import bloc_vision
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": message},
+                        bloc_vision(image),
+                    ],
+                }
+            )
+        else:
+            messages.append({"role": "user", "content": message})
         
         return messages
+
+    @staticmethod
+    def _message_avec_observation(message: str, observation: str) -> str:
+        """
+        Texte du message courant quand l'image a été décrite par l'appel dédié.
+
+        La forme est stable et balisée : le modèle sait que l'observation est
+        la sienne (voir `_get_vision_instructions`), et sait où commence la
+        demande réelle du visiteur.
+        """
+        texte = (message or "").strip() or "Le visiteur a envoyé cette image sans texte."
+        return (
+            "[Observation de l'image jointe]\n"
+            f"{observation.strip()}\n\n"
+            "[Message du visiteur]\n"
+            f"{texte}"
+        )
     
     async def _call_llm_with_fallback(
         self,
@@ -556,6 +903,7 @@ Proposer diagnostic gratuit pour personnaliser la stratégie.
         Post-processing de la réponse LLM
         - Nettoyage
         - Insertion variables dynamiques
+        - Garde-fou A.6 : aucune clé d'agent ne peut atteindre l'écran
         - Validation longueur
         """
         # Nettoyer les espaces
@@ -564,6 +912,13 @@ Proposer diagnostic gratuit pour personnaliser la stratégie.
         # Remplacer les variables dynamiques
         site_name = context.get('site', {}).get('site_name', 'ePerformance')
         response_text = response_text.replace('{{site_name}}', site_name)
+        
+        # Garde-fou A.6 — défense en profondeur.
+        # Le prompt interdit déjà de citer un nom d'agent ; si le modèle le fait
+        # malgré tout, le texte partirait tel quel dans la bulle du visiteur.
+        # On neutralise la fuite ici, à la sortie : c'est le dernier endroit où
+        # on peut le faire avant l'écriture en base et l'envoi au widget.
+        response_text = self._neutraliser_noms_agents(response_text)
         
         # Limiter la longueur (500 mots max ≈ 2500 chars)
         if len(response_text) > 2500:
@@ -574,3 +929,49 @@ Proposer diagnostic gratuit pour personnaliser la stratégie.
                 response_text = response_text[:last_period + 1]
         
         return response_text
+    
+    # Clés techniques d'agent susceptibles de fuir dans une réponse. Elles
+    # viennent des personas Markdown (titres, exemples, `agent_key`) : le
+    # modèle les a sous les yeux, il peut les recopier.
+    MOTIFS_AGENTS = [
+        r'sales-discovery-coach',
+        r'sales-outbound-strategist',
+        r'sales-offer-lead-gen-strategist',
+        r'sales-closer-mlm',
+        r'sales-lead-scorer',
+        r'sales-objection-handler',
+        r'sales-upsell-specialist',
+        r'sales-callback-scheduler',
+        r'sales_expert',
+        r'marketing-[a-z-]+-specialist',
+        r'marketing_specialist',
+        r'marketing-[a-z-]+-(?:manager|architect|hacker|copywriter)',
+        r'design-[a-z-]+-specialist',
+        r'design-ux-optimizer',
+        r'product-pricing-strategist',
+        r'technical_advisor',
+        r'research-market-analyst',
+        r'customer_support',
+        r'discovery coach',
+        r'expert sales',
+        r'agent (?:sales|marketing|design|research|product|support)\b',
+    ]
+    
+    def _neutraliser_noms_agents(self, texte: str) -> str:
+        """
+        Retirer toute clé d'agent du texte rendu au visiteur (règle A.6).
+
+        On ne remplace pas par un autre nom : une fuite est un défaut, pas une
+        information à traduire. On retire le fragment et on nettoie la
+        ponctuation orpheline qui resterait.
+        """
+        nettoye = texte
+        for motif in self.MOTIFS_AGENTS:
+            nettoye = re.sub(motif, '', nettoye, flags=re.IGNORECASE)
+        if nettoye == texte:
+            return texte
+        # Espaces/parentheses/ponctuation laissés par le retrait
+        nettoye = re.sub(r'\(\s*\)', '', nettoye)
+        nettoye = re.sub(r'[ \t]{2,}', ' ', nettoye)
+        nettoye = re.sub(r'[ \t]+([,.;:!?])', r'\1', nettoye)
+        return nettoye.strip()

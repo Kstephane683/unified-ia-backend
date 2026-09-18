@@ -20,6 +20,7 @@ from ...core.auth import get_current_user
 from ...core.database import get_db
 from ...chatbot.service import ChatbotService
 from ...chatbot.models import ChatbotConversation, ChatbotMessage, ChatbotSite
+from ...chatbot.vision import ImageInvalide, preparer_image, resume_pour_journal
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
@@ -29,12 +30,40 @@ router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 # REQUEST / RESPONSE MODELS
 # ============================================================
 
+class ImagePayload(BaseModel):
+    """
+    Image jointe au message — extension du contrat V2 (tâche 6.3-BIS A.1).
+
+    Le widget envoie l'image en base64, sans préfixe de type :
+
+    ```json
+    {"role": "user", "text": "Que penses-tu de ce visuel ?",
+     "image": {"data": "iVBORw0KGgo…", "media_type": "image/png",
+               "detail": "auto", "name": "visuel.png"}}
+    ```
+
+    Règles (voir `backend/chatbot/vision.py`) :
+    - `data` : base64, avec ou sans préfixe `data:image/…;base64,`
+    - `media_type` : **documentaire** — le type réel est détecté par les
+      magic bytes. Un `.png` qui contient du JPEG est traité comme du JPEG.
+    - formats acceptés : JPEG, PNG, GIF, WebP
+    - `detail` : `low` | `high` | `auto` (défaut `auto`) — passé au fournisseur
+    - limite : 4 Mo décodé, grand côté ramené à 512 px (≈ 384 tokens max)
+    """
+    data: str = Field(..., description="Image encodée en base64")
+    media_type: Optional[str] = Field(None, description="Type MIME déclaré (documentaire)")
+    detail: Optional[str] = Field(None, description="low | high | auto")
+    name: Optional[str] = Field(None, description="Nom de fichier d'origine (documentaire)")
+
+
 class DeepChatMessage(BaseModel):
     """Format Deep Chat standard"""
     text: Optional[str] = None
     html: Optional[str] = None
     role: str = Field(..., pattern="^(user|ai)$")
     files: Optional[List[Dict[str, Any]]] = None
+    # Extension A.1 : image jointe (dernier message uniquement)
+    image: Optional[ImagePayload] = None
 
 
 class ChatbotMessageRequest(BaseModel):
@@ -213,7 +242,26 @@ async def send_message(
         
         user_message = last_message.text or ""
         
-        if not user_message.strip():
+        # ============================================================
+        # 1bis. IMAGE JOINTE (extension A.1) — validée AVANT tout appel LLM
+        # ============================================================
+        image = None
+        if last_message.image is not None:
+            try:
+                image = preparer_image(
+                    data=last_message.image.data,
+                    media_type_declare=last_message.image.media_type,
+                    detail=last_message.image.detail,
+                    nom=last_message.image.name,
+                )
+            except ImageInvalide as exc:
+                # 400 explicite : le widget affiche le message tel quel, et le
+                # visiteur comprend ce qui ne va pas (format, poids).
+                raise HTTPException(status_code=400, detail=str(exc))
+            # Journal SANS contenu : type, taille, mesures. Jamais l'image.
+            logger.info(f"Image jointe: {resume_pour_journal(image)}")
+        
+        if not user_message.strip() and image is None:
             raise HTTPException(status_code=400, detail="Empty message")
         
         # ============================================================
@@ -241,80 +289,39 @@ async def send_message(
             conversation_id=request.conversationId,
             user_id=request.userId,
             visitor_info=request.visitorInfo or {},
-            message_history=message_history
+            message_history=message_history,
+            image=image
         )
         
         # ============================================================
         # 4. FORMATTER RÉPONSE DEEP CHAT
         # ============================================================
         
-        # Récupérer la réponse générée
-        response_text = result.get('response', '')
-        suggestions = result.get('suggestions', [])
+        metadata = {
+            "conversation_id": result.get('conversation_id'),
+            "intent": result.get('intent'),
+            # `agent_used` RESTE dans la metadata (observabilité, dashboard
+            # admin, analytics) mais le widget ne l'affiche JAMAIS : règle A.6,
+            # un seul nom visible côté visiteur — Mia.
+            "agent_used": result.get('agent_used'),
+            "actions": result.get('actions', []),
+            "suggestions": result.get('suggestions', []),
+            "processing_time": result.get('processing_time_ms', 0),
+            "human_active": result.get('human_active', False),
+        }
         
-        # Si suggestions (quick replies), générer HTML avec boutons
-        if suggestions:
-            html_response = f"""
-            <div style="display: flex; flex-direction: column; gap: 16px;">
-                <div style="line-height: 1.6; color: #edeae3;">
-                    {response_text}
-                </div>
-                <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px;">
-            """
-            
-            for suggestion in suggestions:
-                html_response += f"""
-                    <button 
-                        onclick="window.deepChatSendMessage('{suggestion}')"
-                        style="
-                            padding: 10px 18px;
-                            border-radius: 999px;
-                            background: rgba(201, 169, 110, 0.12);
-                            color: #c9a96e;
-                            border: 1px solid rgba(201, 169, 110, 0.25);
-                            font-weight: 600;
-                            font-size: 14px;
-                            cursor: pointer;
-                            transition: all 0.2s ease;
-                        "
-                        onmouseover="this.style.background='rgba(201, 169, 110, 0.2)'; this.style.borderColor='#c9a96e'"
-                        onmouseout="this.style.background='rgba(201, 169, 110, 0.12)'; this.style.borderColor='rgba(201, 169, 110, 0.25)'"
-                    >
-                        {suggestion}
-                    </button>
-                """
-            
-            html_response += """
-                </div>
-            </div>
-            """
-            
-            response = ChatbotMessageResponse(
-                html=html_response,
-                metadata={
-                    "conversation_id": result.get('conversation_id'),
-                    "intent": result.get('intent'),
-                    "agent_used": result.get('agent_used'),
-                    "actions": result.get('actions', []),
-                    "suggestions": suggestions,
-                    "processing_time": result.get('processing_time_ms', 0),
-                    "human_active": result.get('human_active', False)
-                }
-            )
-        else:
-            # Réponse simple sans suggestions
-            response = ChatbotMessageResponse(
-                text=response_text,
-                metadata={
-                    "conversation_id": result.get('conversation_id'),
-                    "intent": result.get('intent'),
-                    "agent_used": result.get('agent_used'),
-                    "actions": result.get('actions', []),
-                    "suggestions": suggestions,
-                    "processing_time": result.get('processing_time_ms', 0),
-                    "human_active": result.get('human_active', False)
-                }
-            )
+        # Réponse rendue : `text` seul, `html` toujours null (contrat V2.2).
+        # AVANT : un bloc HTML était généré dès qu'il y avait des suggestions —
+        # des boutons `onclick="window.deepChatSendMessage(...)"` que le widget
+        # ne consomme pas (il rend `metadata.suggestions` en boutons Vue natifs
+        # et DOMPurify retire les `onclick`) et des couleurs en dur
+        # (`#edeae3`, `#c9a96e`) justes en thème sombre. Le texte part
+        # maintenant en clair : le widget le rend en markdown avec les jetons
+        # du design system, la forme ne dépend plus du serveur.
+        response = ChatbotMessageResponse(
+            text=result.get('response', ''),
+            metadata=metadata,
+        )
         
         # Log success
         logger.info(
@@ -322,6 +329,7 @@ async def send_message(
             f"Site: {request.siteId}, "
             f"Intent: {result.get('intent')}, "
             f"Agent: {result.get('agent_used')}, "
+            f"Image: {'oui' if image else 'non'}, "
             f"Conv: {result.get('conversation_id')}"
         )
         
@@ -368,6 +376,9 @@ async def get_conversation_history(
         # Formatter messages
         # NB: colonne = actions_executed (msg.actions n'existe pas → 500)
         # suggestions incluses pour réhydrater les quick replies du widget
+        # human_name : nom RÉEL du conseiller quand un humain a écrit (le badge
+        # « Conseiller » du widget le consomme). Sans ce champ, la reprise
+        # après refresh perdait le nom et retombait sur un libellé générique.
         messages_formatted = [
             {
                 "role": msg.role,
@@ -376,6 +387,7 @@ async def get_conversation_history(
                 "agent_used": msg.agent_used,
                 "actions": msg.actions_executed,
                 "suggestions": msg.suggestions,
+                "human_name": (msg.context_data or {}).get("human_name"),
                 "created_at": msg.created_at.isoformat() if msg.created_at else None
             }
             for msg in messages

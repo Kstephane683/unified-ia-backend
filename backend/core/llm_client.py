@@ -15,6 +15,73 @@ import sys
 import os
 
 
+# ============================================================================
+# DEEPSEEK — RÉGLAGES DU MODÈLE (tâche 6.3-BIS A.1)
+#
+# AUDIT AVANT : la valeur était écrite en dur, deux fois, à l'intérieur de
+# `_call_deepseek` / `_sync_deepseek_call` :
+#     "model": "deepseek-chat"
+# et l'URL l'était aussi : "https://api.deepseek.com/v1/chat/completions".
+# Aucune variable d'environnement DEEPSEEK_MODEL n'existait sur Railway
+# (`railway variables` ne la listait pas) : le modèle était donc NON
+# surchargeable et il fallait redéployer pour le changer.
+#
+# APRÈS : `deepseek-flash` est l'ID unique et natif — c'est aussi lui qui
+# porte la vision. Les alias `deepseek-chat`, `deepseek-v4-flash` et
+# `deepseek-v4-flash-vision-exp` sont routés par le fournisseur vers ce même
+# modèle ; on n'écrit plus que l'ID canonique, surchargeable par
+# DEEPSEEK_MODEL sans redéploiement de code.
+#
+# `deepseek-flash` est un modèle de RAISONNEMENT : il émet d'abord un
+# `reasoning_content` (brouillon interne), puis le `content` utile, et
+# `max_tokens` couvre LES DEUX. Sans `reasoning_effort`, une réponse peut
+# revenir VIDE avec `finish_reason=length` — le code la prendrait pour une
+# panne du provider et basculerait silencieusement sur Claude. D'où :
+#   · `reasoning_effort=none` par défaut (surchargeable) ;
+#   · un rejeu automatique avec budget doublé si la réponse revient vide
+#     alors qu'un raisonnement a bien été émis.
+# Mesuré sur ce dépôt (agent-ia-web/RAPPORT_FINAL_EPERF_CORE.md) :
+# max_tokens=150 → 612 car. de raisonnement, 0 de contenu ; max_tokens=400
+# → 968 car. de raisonnement, 167 car. de contenu.
+# ============================================================================
+
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
+DEEPSEEK_API_URL = os.getenv(
+    "DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions"
+)
+DEEPSEEK_REASONING_EFFORT = os.getenv("DEEPSEEK_REASONING_EFFORT", "none")
+# Budget minimal quand le raisonnement est actif (il mange le budget)
+DEEPSEEK_MIN_TOKENS_RAISONNEMENT = int(os.getenv("DEEPSEEK_MIN_TOKENS", "2048"))
+
+
+def _deepseek_body(
+    messages: List[Dict],
+    temperature: float,
+    max_tokens: int,
+) -> Dict:
+    """Construire le corps DeepSeek (OpenAI-compatible).
+
+    `messages` peut porter du contenu multi-parties
+    (`[{type:text}, {type:image_url}]`) : c'est le format natif de la vision,
+    on le laisse passer tel quel — `json.dumps` le sérialise sans adaptation.
+    """
+    body: Dict = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    # `reasoning_effort` n'est posé que s'il porte une valeur utile : la valeur
+    # sentinelle `default` laisse le fournisseur décider (raisonnement actif).
+    if DEEPSEEK_REASONING_EFFORT and DEEPSEEK_REASONING_EFFORT.lower() not in (
+        "default",
+        "defaut",
+        "",
+    ):
+        body["reasoning_effort"] = DEEPSEEK_REASONING_EFFORT
+    return body
+
+
 class LLMClient:
     """
     Client unifié pour appeler DeepSeek, Claude, OpenAI avec fallback automatique
@@ -228,64 +295,98 @@ class LLMClient:
     
     async def _call_deepseek(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict],
         temperature: float,
         max_tokens: int
     ) -> Optional[Dict]:
         """
         Appeler DeepSeek API (réutilise logique de design_pipeline.py)
         Adapté pour async avec asyncio
+
+        `messages` accepte le contenu multi-parties (vision) : la seule
+        contrainte est que `messages` reste une liste de dicts sérialisables.
         """
         if not self.deepseek_key:
             return None
-        
-        body = json.dumps({
-            "model": "deepseek-chat",
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }).encode("utf-8")
-        
+
+        loop = asyncio.get_event_loop()
+        # Budget « raisonnement » : le brouillon interne se paie sur le même
+        # budget que la réponse, donc on plancher à une valeur utilisable.
+        budget = max_tokens
+        if DEEPSEEK_REASONING_EFFORT and DEEPSEEK_REASONING_EFFORT.lower() not in (
+            "default",
+            "defaut",
+            "",
+            "none",
+        ):
+            budget = max(max_tokens, DEEPSEEK_MIN_TOKENS_RAISONNEMENT)
+
         try:
-            # Utiliser run_in_executor pour l'appel synchrone urllib
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                self._sync_deepseek_call,
-                body
-            )
+            body = json.dumps(
+                _deepseek_body(messages, temperature, budget)
+            ).encode("utf-8")
+            result = await loop.run_in_executor(None, self._sync_deepseek_call, body)
+
+            # Rejeu : réponse VIDE alors qu'un raisonnement a été émis =
+            # budget mangé par le brouillon, ce n'est PAS une panne du
+            # provider. On rejoue une fois avec le budget doublé.
+            if result and result.get("reasoning_truncated"):
+                print(
+                    f"⚠️  DeepSeek {DEEPSEEK_MODEL}: réponse vide (raisonnement "
+                    f"tronqué), rejeu avec max_tokens={budget * 2}",
+                    file=sys.stderr,
+                )
+                body = json.dumps(
+                    _deepseek_body(messages, temperature, budget * 2)
+                ).encode("utf-8")
+                result = await loop.run_in_executor(None, self._sync_deepseek_call, body)
+
             return result
-        
+
         except Exception as e:
             print(f"⚠️  DeepSeek API échec: {e}", file=sys.stderr)
             return None
-    
+
     def _sync_deepseek_call(self, body: bytes) -> Optional[Dict]:
         """
         Appel synchrone DeepSeek (pour run_in_executor)
+
+        Ne remonte JAMAIS `reasoning_content` : c'est le brouillon interne du
+        modèle, il ne doit pas devenir une réponse affichée au visiteur.
         """
         req = urllib.request.Request(
-            "https://api.deepseek.com/v1/chat/completions",
+            DEEPSEEK_API_URL,
             data=body,
             headers={
                 "Authorization": f"Bearer {self.deepseek_key}",
                 "Content-Type": "application/json"
             },
         )
-        
+
         with urllib.request.urlopen(req, timeout=180) as resp:
             data = json.loads(resp.read())
-        
+
         if "choices" in data and len(data["choices"]) > 0:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            message = choice.get("message") or {}
+            content = message.get("content")
             if content:  # Pas de limite 50 chars, même réponse courte valide
                 return {
                     'content': content,
                     'tokens_used': data.get('usage', {}).get('total_tokens', 0),
-                    'model': 'deepseek-chat',
+                    'model': DEEPSEEK_MODEL,
                     'provider': 'DeepSeek'
                 }
-        
+            # Contenu vide + raisonnement émis → troncature, pas une panne.
+            if (message.get("reasoning_content") or "").strip():
+                return {
+                    'content': '',
+                    'tokens_used': data.get('usage', {}).get('total_tokens', 0),
+                    'model': DEEPSEEK_MODEL,
+                    'provider': 'DeepSeek',
+                    'reasoning_truncated': True,
+                }
+
         return None
     
     async def _call_claude(

@@ -16,101 +16,146 @@ class AgentRouter:
     """
     
     # Mapping Intent → Agent (clé = filename sans extension)
+    #
+    # Les valeurs DOIVENT correspondre à un fichier réel de
+    # `backend/chatbot/agents/<catégorie>/<clé>.md` : sinon `_get_agent_path`
+    # rend None et le persona n'est pas chargé — le LLM répond alors sans
+    # expertise. Plusieurs entrées pointaient vers des agents inexistants
+    # avant la tâche 6.3-BIS ; elles ont été alignées sur les 27 fichiers réels.
     INTENT_TO_AGENT_MAP = {
         # Sales intents
         'diagnostic_request': 'sales-discovery-coach',
         'product_inquiry': 'sales-offer-lead-gen-strategist',
         'order_intent': 'sales-offer-lead-gen-strategist',
-        'objection_handling': 'sales-discovery-coach',
+        'objection_handling': 'sales-objection-handler',
         'pricing_question': 'sales-offer-lead-gen-strategist',
-        'negotiation': 'sales-deal-strategist',
-        'contract_review': 'sales-engineer',
-        'account_strategy': 'sales-account-strategist',
-        'sales_process': 'sales-coach',
-        'pipeline_review': 'sales-pipeline-analyst',
-        'proposal_writing': 'sales-proposal-strategist',
+        'negotiation': 'sales_expert',
+        'contract_review': 'sales_expert',
+        'account_strategy': 'sales_expert',
+        'sales_process': 'sales-discovery-coach',
+        'pipeline_review': 'sales-lead-scorer',
+        'proposal_writing': 'sales-offer-lead-gen-strategist',
         
         # Marketing intents
-        'content_strategy': 'marketing-content-creator',
-        'social_media_strategy': 'marketing-social-media-strategist',
-        'email_marketing': 'marketing-email-strategist',
+        'content_strategy': 'marketing-content-specialist',
+        'social_media_strategy': 'marketing-social-media-manager',
+        'email_marketing': 'marketing-email-specialist',
         'seo_question': 'marketing-seo-specialist',
+        'technical_seo': 'marketing-seo-specialist',
         'growth_hacking': 'marketing-growth-hacker',
-        'instagram_content': 'marketing-instagram-curator',
-        'linkedin_content': 'marketing-linkedin-content-creator',
-        'twitter_content': 'marketing-twitter-engager',
-        'reddit_strategy': 'marketing-reddit-community-builder',
-        'video_optimization': 'marketing-video-optimization-specialist',
-        'short_video_editing': 'marketing-short-video-editing-coach',
-        'carousel_creation': 'marketing-carousel-growth-engine',
-        'pr_communications': 'marketing-pr-communications-manager',
-        'multi_platform_publishing': 'marketing-multi-platform-publisher',
+        'instagram_content': 'marketing-social-media-manager',
+        'linkedin_content': 'marketing-social-media-manager',
+        'twitter_content': 'marketing-social-media-manager',
+        'reddit_strategy': 'marketing-social-media-manager',
+        'video_optimization': 'marketing-social-media-manager',
+        'short_video_editing': 'marketing-social-media-manager',
+        'carousel_creation': 'marketing-content-specialist',
+        'pr_communications': 'marketing-content-specialist',
+        'multi_platform_publishing': 'marketing-social-media-manager',
+        'copywriting': 'marketing-copywriter',
+        'analytics_reporting': 'marketing-analytics-specialist',
+        'whatsapp_marketing': 'marketing-whatsapp-specialist',
         
         # MLM/Parrainage intents (spécifique ePerformance)
-        'mlm_advice': 'sales-outbound-strategist',
-        'mlm_recruitment': 'sales-outbound-strategist',
+        'mlm_advice': 'sales-closer-mlm',
+        'mlm_recruitment': 'sales-closer-mlm',
         'mlm_automation': 'marketing-growth-hacker',
         
         # Design intents
-        'brand_identity': 'design-brand-guardian',
-        'image_creation': 'design-image-prompt-engineer',
-        'visual_storytelling': 'design-visual-storyteller',
+        'brand_identity': 'design-brand-identity-specialist',
+        'image_creation': 'design-brand-identity-specialist',
+        'visual_storytelling': 'design-ux-optimizer',
         
-        # Research intents
-        'market_research': 'research-deep-agent',
-        'trend_analysis': 'product-trend-researcher',
-        'competitive_analysis': 'research-synthesist',
-        'ia_trends': 'research-deep-agent',
+        # Research / Product intents
+        'market_research': 'research-market-analyst',
+        'trend_analysis': 'product-pricing-strategist',
+        'competitive_analysis': 'research-market-analyst',
+        'ia_trends': 'marketing-growth-hacker',
         
         # Support & General
-        'support_question': 'marketing-email-strategist',  # Support clair et pédago
-        'technical_support': 'sales-engineer',
-        'general_question': 'sales-discovery-coach',  # Questions ouvertes
+        'support_question': 'customer_support',
+        'technical_support': 'technical_advisor',
+        'technical_advisor': 'technical_advisor',
+        'general_question': 'sales-discovery-coach',
         'greeting': 'sales-discovery-coach',
-        'fallback': 'sales-discovery-coach',  # Agent par défaut
+        'fallback': 'sales-discovery-coach',
+
+        # ============================================================
+        # LES NEUF CAPACITÉS DES SUGGESTIONS — tâche 6.3-BIS A.8
+        #
+        # Déclenchées par les suggestions de l'accueil et de l'onglet Aide
+        # (payload `[intent:<clé>] <libellé>`). Ce mapping est STRICTEMENT
+        # backend : il ne sort jamais autrement que par `metadata.agent_used`,
+        # que le widget n'affiche plus (règle A.6).
+        #
+        # Chaque entrée choisit l'agent dont l'expertise DÉMONTRE la
+        # compétence annoncée par le libellé — c'est l'objectif stratégique
+        # d'A.8 : une réponse concrète, pas une redirection.
+        # ============================================================
+        'clients': 'sales-outbound-strategist',       # Trouver plus de clients
+        'mlm': 'sales-closer-mlm',                    # Développer mon MLM / parrainage
+        'ventes': 'sales_expert',                     # Améliorer mes ventes
+        'site_web': 'design-landing-page-specialist', # Créer un site web qui convertit
+        'seo': 'marketing-seo-specialist',            # Améliorer mon référencement
+        'ads': 'marketing-meta-ads-specialist',       # Lancer une campagne publicitaire
+        'social': 'marketing-social-media-manager',   # Gérer mes réseaux sociaux
+        'ia_auto': 'marketing-growth-hacker',         # Exploiter l'IA et l'automatisation
+        'funnel': 'marketing-funnel-architect',       # Optimiser mon tunnel de conversion
     }
+
+    # Intents qu'un clic de suggestion peut demander (A.8). Sert au contrôle
+    # de cohérence : tout intent listé ici DOIT avoir une entrée ci-dessus.
+    INTENTS_SUGGESTIONS = (
+        'clients', 'mlm', 'ventes', 'site_web', 'seo',
+        'ads', 'social', 'ia_auto', 'funnel',
+    )
     
     # Agents par catégorie (pour enrichissement contextuel)
+    #
+    # Tâche 6.3-BIS : cette liste portait des clés qui n'existaient PAS dans
+    # `agents/` (les personas n'étaient donc pas chargés) et ignorait une
+    # partie des fichiers réels. Elle reflète maintenant exactement le
+    # contenu du dossier — 27 fichiers sur 6 catégories.
     AGENT_CATEGORIES = {
         'sales': [
+            'sales-callback-scheduler',
+            'sales-closer-mlm',
             'sales-discovery-coach',
+            'sales_expert',
+            'sales-lead-scorer',
+            'sales-objection-handler',
             'sales-offer-lead-gen-strategist',
-            'sales-deal-strategist',
-            'sales-account-strategist',
             'sales-outbound-strategist',
-            'sales-coach',
-            'sales-engineer',
-            'sales-pipeline-analyst',
-            'sales-proposal-strategist',
+            'sales-upsell-specialist',
         ],
         'marketing': [
-            'marketing-content-creator',
-            'marketing-email-strategist',
-            'marketing-social-media-strategist',
-            'marketing-seo-specialist',
+            'marketing-analytics-specialist',
+            'marketing-content-specialist',
+            'marketing-copywriter',
+            'marketing-email-specialist',
+            'marketing-funnel-architect',
             'marketing-growth-hacker',
-            'marketing-instagram-curator',
-            'marketing-linkedin-content-creator',
-            'marketing-twitter-engager',
-            'marketing-reddit-community-builder',
-            'marketing-video-optimization-specialist',
-            'marketing-short-video-editing-coach',
-            'marketing-carousel-growth-engine',
-            'marketing-pr-communications-manager',
-            'marketing-multi-platform-publisher',
+            'marketing-meta-ads-specialist',
+            'marketing-seo-specialist',
+            'marketing-social-media-manager',
+            'marketing_specialist',
+            'marketing-whatsapp-specialist',
         ],
         'design': [
-            'design-brand-guardian',
-            'design-image-prompt-engineer',
-            'design-visual-storyteller',
-        ],
-        'research': [
-            'research-deep-agent',
-            'research-synthesist',
+            'design-brand-identity-specialist',
+            'design-landing-page-specialist',
+            'design-ux-optimizer',
         ],
         'product': [
-            'product-trend-researcher',
-        ]
+            'product-pricing-strategist',
+            'technical_advisor',
+        ],
+        'research': [
+            'research-market-analyst',
+        ],
+        'support': [
+            'customer_support',
+        ],
     }
     
     def __init__(self, agents_base_path: str = "agents"):
@@ -153,10 +198,16 @@ class AgentRouter:
             routing_reason = "fallback"
         
         # 3. Override contextuel (ex: utilisateur MLM détecté)
-        if self._should_override_for_mlm(context, intent):
+        #    SAUF si l'intent vient d'une suggestion cliquée : le visiteur a
+        #    explicitement demandé cette compétence (« Améliorer mon
+        #    référencement »), l'override MLM la détournerait (A.8).
+        suggestion_explicite = (intent_metadata or {}).get('source') == 'suggestion_click'
+        if not suggestion_explicite and self._should_override_for_mlm(context, intent):
             alternatives.append(agent_key)
             agent_key = 'sales-outbound-strategist'
             routing_reason = "mlm_override"
+        elif suggestion_explicite:
+            routing_reason = "suggestion_intent"
         
         # 4. Générer alternatives intelligentes
         if not alternatives:
@@ -216,7 +267,11 @@ class AgentRouter:
         # Analyser le contexte utilisateur
         user_profile = context.get('user_profile', {})
         visitor_info = context.get('visitor_info', {})
-        history = context.get('message_history', [])
+        # NB (tâche 6.3-BIS) : ContextBuilder remplit la clé `history`, pas
+        # `message_history` — l'override MLM ne se déclenchait donc JAMAIS en
+        # production. On lit les deux : la première si elle existe, la seconde
+        # pour les appelants qui utilisent l'ancien nom.
+        history = context.get('history') or context.get('message_history') or []
         
         # Indices MLM dans le profil
         mlm_keywords = ['longrich', 'mlm', 'network marketing', 'parrainage', 'distributeur']
