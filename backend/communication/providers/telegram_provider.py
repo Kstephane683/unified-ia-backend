@@ -410,8 +410,8 @@ TELEGRAM_USAGE_EXAMPLES = """
 provider = TelegramProvider()
 
 await provider.send({
-    "bot_token": "8760593501:AAFky23ITJHGGOi96D0V-dbGEFHL_0_4vPg",
-    "chat_id": "8441274889",
+    "bot_token": "<TELEGRAM_BOT_TOKEN>",
+    "chat_id": "<TELEGRAM_ADMIN_CHAT_ID>",
     "message": "Bonjour ! Votre commande #CMD001 est confirmée."
 })
 ```

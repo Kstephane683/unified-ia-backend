@@ -88,12 +88,12 @@ Charge automatiquement depuis `/home/ballo/OX6A/toolkit_eperformance/config_ia.j
 {
   "provider": "deepseek",
   "api_keys": {
-    "deepseek": "sk-YOUR_DEEPSEEK_API_KEY",
-    "anthropic": "sk-YOUR_ANTHROPIC_API_KEY"
+    "deepseek": "${DEEPSEEK_API_KEY}",
+    "anthropic": "${ANTHROPIC_API_KEY}"
   },
   "claude_gateway": {
     "url": "https://aiapiflow.com/v1/chat/completions",
-    "api_key": "sk-YOUR_CLAUDE_GATEWAY_KEY",
+    "api_key": "${CLAUDE_GATEWAY_KEY}",
     "model": "claude-sonnet-5"
   }
 }

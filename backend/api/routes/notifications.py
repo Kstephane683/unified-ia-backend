@@ -16,6 +16,7 @@ Author: ePerformance IA System
 Date: 2026-09-10
 """
 
+import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 
@@ -162,7 +163,7 @@ def get_notification_service(db: Session = Depends(get_db)) -> NotificationServi
     
     # Telegram config
     telegram_config = {
-        "default_bot_token": "8760593501:AAFky23ITJHGGOi96D0V-dbGEFHL_0_4vPg"
+        "default_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", "")
     }
     
     return NotificationService(

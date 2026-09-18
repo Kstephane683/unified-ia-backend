@@ -18,4 +18,6 @@ except Exception as e:
 PYEOF
 echo "[smoke-test] Compilation py_compile de tous les fichiers modifiés..."
 python3 -m compileall -q backend/ > /dev/null
+echo "[smoke-test] Recherche de secrets dans les fichiers suivis..."
+python3 scripts/verifier-secrets.py
 echo "[smoke-test] PASS — push autorisé"

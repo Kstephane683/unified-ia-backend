@@ -152,8 +152,8 @@ class CommunicationConfig:
         """Get Telegram provider configuration"""
         
         return {
-            "default_bot_token": self.get("TELEGRAM_BOT_TOKEN", "8760593501:AAFky23ITJHGGOi96D0V-dbGEFHL_0_4vPg"),
-            "admin_chat_id": self.get("TELEGRAM_ADMIN_CHAT_ID", "8441274889")
+            "default_bot_token": self.get("TELEGRAM_BOT_TOKEN", ""),
+            "admin_chat_id": self.get("TELEGRAM_ADMIN_CHAT_ID", "")
         }
     
     def get_database_url(self) -> str:

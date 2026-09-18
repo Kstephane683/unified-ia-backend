@@ -20,13 +20,13 @@
 
 ```
 DEEPSEEK_API_KEY
-Valeur: sk-4d2ba90c4be141ce943922bfe3252fb0
+Valeur: <a renseigner dans Railway, jamais dans ce fichier>
 
 CLAUDE_GATEWAY_URL
 Valeur: https://aiapiflow.com/v1/chat/completions
 
 CLAUDE_GATEWAY_KEY
-Valeur: sk-2018ca8b5146eb7772be4183f888678981c187b3ab0cf90a7b2a4a108da2886b
+Valeur: <a renseigner dans Railway, jamais dans ce fichier>
 
 CORS_ORIGINS
 Valeur: https://eperformance.pro,https://www.eperformance.pro

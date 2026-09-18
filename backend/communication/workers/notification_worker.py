@@ -17,6 +17,7 @@ Date: 2026-09-10
 """
 
 import asyncio
+import os
 import signal
 import sys
 import argparse
@@ -304,7 +305,7 @@ class NotificationWorker:
         }
         
         telegram_config = {
-            "default_bot_token": "8760593501:AAFky23ITJHGGOi96D0V-dbGEFHL_0_4vPg"
+            "default_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", "")
         }
         
         return NotificationService(

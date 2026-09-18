@@ -123,7 +123,7 @@ except Exception as e:
 **Test manuel DeepSeek :**
 ```bash
 curl https://api.deepseek.com/v1/chat/completions \
-  -H "Authorization: Bearer sk-d29d646c59f841e28bdd5502f82e1d8d" \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"Hello"}]}'
 ```
@@ -131,7 +131,7 @@ curl https://api.deepseek.com/v1/chat/completions \
 **Test manuel Claude Gateway :**
 ```bash
 curl https://aiapiflow.com/v1/chat/completions \
-  -H "Authorization: Bearer sk-2018ca8b5146eb7772be4183f888678981c187b3ab0cf90a7b2a4a108da2886b" \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-5","messages":[{"role":"user","content":"Hello"}]}'
 ```

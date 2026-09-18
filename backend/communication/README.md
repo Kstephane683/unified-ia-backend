@@ -171,7 +171,7 @@ WHATSAPP_ACCESS_TOKEN=...
 WHATSAPP_API_VERSION=v21.0
 
 # Telegram Bot API
-TELEGRAM_BOT_TOKEN=8760593501:AAFky23ITJHGGOi96D0V-dbGEFHL_0_4vPg
+TELEGRAM_BOT_TOKEN=<votre-jeton-de-bot>
 TELEGRAM_ADMIN_CHAT_ID=8441274889
 
 # Redis (pour queues)
@@ -201,8 +201,8 @@ RATE_LIMIT_PER_DAY=1000
 ### 3. Telegram Bot
 
 **Bot existant configuré :**
-- Bot Token: `8760593501:AAFky23ITJHGGOi96D0V-dbGEFHL_0_4vPg`
-- Admin Chat ID: `8441274889`
+- Bot Token: `<votre-jeton-de-bot>`
+- Admin Chat ID: `<votre-chat-id-admin>`
 - Webhook: À configurer (optionnel, polling par défaut)
 
 ---
@@ -483,7 +483,7 @@ Tous les exemples de code sont **production-ready** :
 ### Contacts
 - **DPO (RGPD)** : ballo@eperformance.pro
 - **Admin système** : Copie automatique (BCC) de tous les emails
-- **Alertes Telegram** : Chat ID `8441274889`
+- **Alertes Telegram** : Chat ID `<votre-chat-id-admin>`
 
 ### Monitoring
 - **Uptime SLA** : 99.9% (8h45 downtime/an max)
