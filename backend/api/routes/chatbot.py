@@ -384,7 +384,6 @@ async def get_conversation_history(
                 "role": msg.role,
                 "content": msg.content,
                 "intent": msg.intent,
-                "agent_used": msg.agent_used,
                 "actions": msg.actions_executed,
                 "suggestions": msg.suggestions,
                 "human_name": (msg.context_data or {}).get("human_name"),
