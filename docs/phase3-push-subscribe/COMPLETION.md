@@ -6,7 +6,7 @@
 | **Périmètre** | backend uniquement — le versant widget est dans `eperformance-widget/docs/phase3-push-subscribe/RAPPORT-WIDGET.md` |
 | **Objet** | le dernier point d'interface serveur manquant de la chaîne de notifications : servir la clé PUBLIQUE VAPID que `PushManager.subscribe()` exige |
 | **Amont** | `docs/phase3-push-subscribe/RAPPORT.md` (§7.3 et §8.1, où ce besoin a été identifié) |
-| **État** | livré et vérifié ; commit local, non poussé (voir §8) |
+| **État** | livré, vérifié, **poussé et déployé** — l'endpoint répond en production (§8.2) |
 
 ---
 
@@ -336,6 +336,22 @@ configure : False | cle servie : None | forme : PEM
 occurrences de la cle privee dans le journal : 0
 ```
 
+### 5.7 En production, après déploiement
+
+Le commit a été poussé sur `main` (le garde-fou de secrets et celui de parité
+Docker ont laissé passer après correction, §9), Railway a redéployé, et
+l'endpoint répond sur le service réel :
+
+```
+$ curl -s https://web-production-4ab53.up.railway.app/api/chatbot/push/config
+HTTP 200
+{"canal":{"canal":"webpush","configure":false,"raison":"non configuré : VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY manquant(s) — le propriétaire n'a pas encore créé les clés VAPID du push navigateur","detail":{}},"configure":false,"cle_publique":null,"raison":"non configuré : …","forme_cle":"absente","message":"push non configuré côté serveur : le widget ne propose pas les notifications, aucun réglage n'est nécessaire côté visiteur"}
+```
+
+C'est exactement l'état attendu aujourd'hui : la production n'a pas de clés
+VAPID, l'endpoint le dit sans erreur, et le widget ne propose donc rien
+(vérifié de son côté, voir `eperformance-widget/docs/phase3-push-subscribe/RAPPORT-WIDGET.md` §7).
+
 ---
 
 ## 6. Tests
@@ -448,8 +464,11 @@ propose simplement pas la fonctionnalité.
    `clé privée PKCS8 (variable inversée ?)`, les deux lignes ont été
    interchangées : la clé privée est dans la variable publique et doit être
    remplacée immédiatement. L'endpoint le dit sans jamais publier la valeur.
-3. **Décider du push** : le déploiement Railway se déclenche à chaque push sur
-   `main`, c'est une décision du propriétaire, pas de cette session.
+3. **Rien d'autre à faire pour que la chaîne serveur fonctionne.** Le commit a
+   été poussé sur `main`, Railway a redéployé, et l'endpoint répond en
+   production (vérifié, §5.7). C'est la seule décision de déploiement qui était
+   nécessaire, et elle est prise : la suite — création des clés — n'engage que
+   des variables d'environnement, aucun code.
 
 ### 8.3 Limites connues, assumées
 
@@ -491,10 +510,28 @@ $ python3 -m pytest backend/ -q
 277 passed, 19 skipped, 2 errors
 ```
 
-### Commit
+### Commit et déploiement
 
-Un seul commit, un seul sujet :
+Un seul commit, un seul sujet, poussé sur `main` :
 
 ```
-feat(push): GET /api/chatbot/push/config — la clé publique VAPID, jamais la privée
+6b62714 feat(push): GET /api/chatbot/push/config — la clé publique VAPID, jamais la privée
 ```
+
+```
+$ git push origin main
+[smoke-test] Recherche de secrets dans les fichiers suivis...
+[secrets] PASS — aucun secret detecte (129 fichier(s))
+[smoke-test] Parité avec la copie Docker (contrat C12)...
+[parite] PASS — arborescences identiques (133 fichiers, md5) · 54 variables lues par le code, toutes declarees
+[smoke-test] PASS — push autorisé
+To https://github.com/Kstephane683/unified-ia-backend.git
+   9ebd89d..6b62714  main -> main
+```
+
+Le déclencheur pre-push a bloqué les deux premières tentatives — c'est son
+travail, et le détail est au §6.4 : d'abord l'en-tête PEM cité par un test,
+ensuite (dans ce rapport lui-même) la chaîne qui l'écrit. Dans les deux cas la
+correction a consisté à cesser de citer littéralement l'en-tête, jamais à
+assouplir le garde-fou. Le contrôle de parité Docker fait partie du même
+déclencheur : la copie est donc restée synchronisée à chaque tentative.
