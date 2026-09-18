@@ -14,3 +14,10 @@ python-multipart==0.0.6
 requests==2.31.0
 httpx==0.25.2
 pillow==10.1.0
+# Push navigateur (P3-PUSH, consommé par la tâche 6.5). Importé PARESSEUSEMENT,
+# à l'intérieur de la fonction d'envoi : son absence est un état affiché, jamais
+# une panne de démarrage — leçon de l'incident de production déjà connu.
+# Version vérifiée installable en environnement vierge, sans changer aucune des
+# dépendances ci-dessus (résolution pip complète ; preuve brute dans
+# docs/phase3-push-subscribe/RAPPORT.md). Exige Python >= 3.10.
+pywebpush==2.5.0
