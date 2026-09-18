@@ -186,6 +186,172 @@ def tronquer_endpoint(endpoint: str, longueur: int = 48) -> str:
 
 
 # ============================================================
+# LA CLÉ PUBLIQUE SERVIE AU NAVIGATEUR
+# ============================================================
+#
+# POURQUOI UN CONTRÔLE DE FORME AVANT DE SERVIR, ET PAS UN SIMPLE os.getenv
+# -------------------------------------------------------------------------
+# `GET /api/chatbot/push/config` est PUBLIC : tout ce qu'il renvoie est lisible
+# par n'importe qui, et il est mis en cache par les intermédiaires. Or
+# `VAPID_PUBLIC_KEY` est une variable que le propriétaire recopie à la main
+# depuis la sortie d'un script qui imprime DEUX lignes qui se ressemblent (voir
+# docs/phase3-push-subscribe/RAPPORT.md §7.1). Une inversion des deux lignes —
+# ou le copier-coller du mauvais bloc — mettrait la clé PRIVÉE dans la variable
+# publique, et cet endpoint la publierait alors au monde entier.
+#
+# Le contrôle ci-dessous n'est donc pas une politesse de format : c'est ce qui
+# rend la fuite impossible MÊME en cas d'erreur de manipulation. La valeur n'est
+# servie que si elle se décode réellement comme un POINT PUBLIC P-256 (X962 non
+# compressé, 65 octets, sur la courbe). Échouent à ce test, et ne sont donc
+# jamais servis :
+#   · une clé privée PKCS8 (138 octets DER, 184 caractères base64url, commence
+#     par « MIGHAgEAMBMGByqGSM49… » — exactement la ligne que le script imprime
+#     en premier) ;
+#   · un PEM, multiligne ou sur une ligne ;
+#   · la graine brute de 32 octets (43 caractères).
+#
+# Ni le message d'échec ni les journaux ne recopient la valeur suspecte, pas
+# même un préfixe : c'est précisément le cas où elle peut être un secret.
+
+#: Longueur en base64url sans remplissage d'un point X962 non compressé sur
+#: P-256 (65 octets) : c'est la forme que produit la commande documentée.
+LONGUEUR_CLE_PUBLIQUE = 87
+
+#: Longueur d'une clé privée PKCS8 P-256 en base64url sans remplissage. Sert
+#: uniquement à un message de diagnostic (jamais à accepter quoi que ce soit).
+LONGUEUR_CLE_PRIVEE_PKCS8 = 184
+
+#: Préfixe d'une clé privée PKCS8 P-256 en base64url (« MIGHAgEAMBMGByqGSM49… »).
+#: Constaté, jamais utilisé comme critère de refus à lui seul.
+PREFIXE_CLE_PRIVEE_PKCS8 = "MIGHAgEAMBMGByqGSM49"
+
+
+@dataclass(frozen=True)
+class ConfigClePublique:
+    """Ce que le navigateur peut utiliser — ou pourquoi il ne peut pas."""
+
+    #: Clé à passer en `applicationServerKey` (base64url sans remplissage).
+    cle: Optional[str] = None
+    #: Pourquoi la clé n'est pas servie. Ne contient JAMAIS la valeur.
+    raison: Optional[str] = None
+    #: Longueur de la variable posée, pour le diagnostic (0 si absente).
+    longueur_declaree: int = 0
+    #: Forme reconnue, en clair : « point public P-256 », « PEM », « absente »…
+    forme: str = "absente"
+
+    @property
+    def disponible(self) -> bool:
+        return self.cle is not None
+
+
+def _forme_declaree(valeur: str) -> str:
+    """Étiquette de forme, SANS recopier la valeur. Pour le diagnostic."""
+    if not valeur:
+        return "absente"
+    if "-----" in valeur or "BEGIN" in valeur.upper():
+        return "PEM"
+    if len(valeur) == LONGUEUR_CLE_PRIVEE_PKCS8 or valeur.startswith(PREFIXE_CLE_PRIVEE_PKCS8):
+        return "clé privée PKCS8 (variable inversée ?)"
+    if not _MOTIF_CLE.match(valeur):
+        return "caractères hors base64url"
+    if len(valeur) == LONGUEUR_CLE_PUBLIQUE:
+        return "base64url de longueur attendue"
+    return "base64url de longueur inattendue"
+
+
+def _est_point_public_p256(octets: bytes) -> bool:
+    """Vrai si ces octets sont un point public P-256 valide et SUR LA COURBE.
+
+    `cryptography` est présent en production (dépendance de
+    `python-jose[cryptography]` et de `pywebpush`) mais il est importé ICI,
+    paresseusement, comme partout dans ce projet : son absence doit dégrader le
+    diagnostic, jamais empêcher le démarrage du service. Le repli porte sur la
+    forme — 65 octets et un premier octet à 0x04 — qui suffit déjà à écarter
+    une clé privée, un PEM et une graine brute.
+    """
+    if len(octets) != 65 or octets[0] != 0x04:
+        return False
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), octets)
+        return True
+    except ImportError:  # pragma: no cover - dépendance toujours présente en production
+        return True
+    except Exception:
+        # Le point n'est pas sur la courbe, ou la courbe n'est pas P-256 : ce
+        # n'est pas une clé publique utilisable.
+        return False
+
+
+def config_cle_publique() -> ConfigClePublique:
+    """La clé publique VAPID, prête pour `PushManager.subscribe()`.
+
+    Ne lit QUE `VAPID_PUBLIC_KEY` : la clé privée n'est ni lue, ni contrôlée,
+    ni nommée par cette fonction — elle n'a aucune raison d'approcher un
+    endpoint public. La valeur n'est rendue que si elle est un point public
+    P-256 valide, pour qu'une variable inversée ne puisse pas publier un secret
+    (voir le commentaire de section ci-dessus).
+
+    Ne lève jamais : l'absence de clé est un état, pas une erreur.
+    """
+    brute = (os.getenv("VAPID_PUBLIC_KEY") or "").strip()
+    forme = _forme_declaree(brute)
+    if not brute:
+        return ConfigClePublique(
+            raison=(
+                "VAPID_PUBLIC_KEY absente — le propriétaire n'a pas encore créé "
+                "les clés VAPID du push navigateur"
+            ),
+            longueur_declaree=0,
+            forme=forme,
+        )
+
+    # La clé se transporte sans remplissage ; on tolère le remplissage `=`
+    # plutôt que de refuser une variable collée telle quelle depuis un outil
+    # qui en ajoute.
+    candidat = brute.rstrip("=")
+    if not _MOTIF_CLE.match(candidat):
+        return ConfigClePublique(
+            raison=(
+                "VAPID_PUBLIC_KEY n'est pas du base64url : attendu la clé "
+                "PUBLIQUE (point P-256 non compressé, "
+                f"{LONGUEUR_CLE_PUBLIQUE} caractères), pas un PEM ni la clé privée"
+            ),
+            longueur_declaree=len(brute),
+            forme=forme,
+        )
+
+    try:
+        import base64
+
+        octets = base64.urlsafe_b64decode(candidat + "=" * (-len(candidat) % 4))
+    except Exception:
+        octets = b""
+
+    if not _est_point_public_p256(octets):
+        return ConfigClePublique(
+            raison=(
+                "VAPID_PUBLIC_KEY ne se décode pas comme un point public P-256 "
+                f"valide ({len(brute)} caractères déclarés ; attendu "
+                f"{LONGUEUR_CLE_PUBLIQUE} pour la clé publique, "
+                f"{LONGUEUR_CLE_PRIVEE_PKCS8} pour la clé privée PKCS8 — une "
+                "variable inversée est l'erreur la plus fréquente). Aucune clé "
+                "n'est servie tant que la valeur n'est pas une clé publique."
+            ),
+            longueur_declaree=len(brute),
+            forme=forme,
+        )
+
+    return ConfigClePublique(
+        cle=candidat,
+        raison=None,
+        longueur_declaree=len(brute),
+        forme="point public P-256 (base64url X962)",
+    )
+
+
+# ============================================================
 # ABONNEMENT PRÊT À L'ENVOI
 # ============================================================
 
@@ -510,12 +676,15 @@ def vers_api(ligne: PushSubscription) -> dict:
 #: Types exportés pour les tests et les routes.
 __all__: Sequence[str] = (
     "AbonnementPush",
+    "ConfigClePublique",
     "FOURNISSEURS_PAR_DEFAUT",
+    "LONGUEUR_CLE_PUBLIQUE",
     "LONGUEUR_ENDPOINT_MAX",
     "LONGUEUR_MIN_AUTH",
     "LONGUEUR_MIN_P256DH",
     "abonnements_actifs",
     "compter_actifs",
+    "config_cle_publique",
     "desabonner",
     "enregistrer",
     "fournisseurs_autorises",

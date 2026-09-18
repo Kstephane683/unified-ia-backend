@@ -6,6 +6,7 @@ Routes:
 - POST /api/chatbot/message - Envoyer message (pipeline complet)
 - GET /api/chatbot/conversation/{id} - Historique conversation
 - GET /api/chatbot/search - Recherche dans les articles du blog (tâche 6.8)
+- GET /api/chatbot/push/config - Clé publique VAPID pour le navigateur (P3-PUSH, public)
 - POST /api/chatbot/push/subscribe - Abonnement au push navigateur (P3-PUSH, public)
 - DELETE /api/chatbot/push/unsubscribe - Désabonnement (P3-PUSH, public)
 - POST /api/chatbot/sites/{site_id}/configure - Config multi-tenant (admin)
@@ -788,6 +789,77 @@ async def get_site_analytics(
 #     concerné : personne ne peut désabonner le navigateur d'un autre ;
 #   · la route d'écriture est bornée par le limiteur de débit de l'application
 #     (`_RATE_LIMITS` dans `backend/api/app.py`).
+
+
+@router.get("/push/config", response_model=None)
+async def configurer_push():
+    """
+    Servir la clé PUBLIQUE VAPID au navigateur (P3-PUSH).
+
+    `PushManager.subscribe()` exige en `applicationServerKey` la clé publique
+    VAPID. Elle est publique par nature — elle est transmise à chaque
+    abonnement — mais elle ne peut pas être écrite en dur dans le widget : une
+    rotation de clés obligerait alors à republier le widget. Cette route est le
+    seul point d'interface qui la transporte.
+
+    TROIS PROPRIÉTÉS, ET POURQUOI CHACUNE EST NÉCESSAIRE :
+
+    1. **La clé privée ne sort jamais.** Cette route ne lit QUE
+       `VAPID_PUBLIC_KEY`, et elle ne sert la valeur que si elle se décode
+       réellement comme un point public P-256 sur la courbe (`config_cle_publique`).
+       Une variable inversée — la clé privée collée dans la variable publique,
+       l'erreur de manipulation la plus probable puisque le script de génération
+       imprime les deux lignes à la suite — ne peut donc pas être publiée ici :
+       elle est REFUSÉE, et le motif ne recopie jamais la valeur (voir les tests
+       `TestClePriveeJamaisExposee`).
+
+    2. **La route est publique et en lecture seule.** Elle n'écrit rien, ne
+       prend aucun paramètre, ne touche pas la base et n'appelle aucun service
+       extérieur : sa réponse ne dépend que de l'environnement. Elle peut donc
+       répondre même si la base est indisponible, ce qui est utile au widget qui
+       la consulte au chargement. Elle n'est pas limitée en débit pour cette
+       raison : c'est une constante, il n'y a rien à abuser.
+
+    3. **L'absence de clé est un ÉTAT, pas une erreur.** Sans clé configurée,
+       la réponse reste 200 avec `configure = faux` et une `raison` en clair :
+       le widget cesse alors simplement de proposer la fonctionnalité, sans
+       rien casser. Un 404 ou un 503 obligerait le widget à interpréter un code
+       d'erreur pour un cas nominal.
+
+    `configure` est vrai seulement si le serveur peut À LA FOIS recevoir
+    l'abonnement et envoyer la notification (clé publique exploitable ET clé
+    privée présente) : promettre la fonctionnalité au visiteur alors que rien
+    ne pourrait partir serait une fausse promesse. `canal` porte l'état brut du
+    canal, pour le diagnostic.
+    """
+    etat = notifications.etat_canal("webpush")
+    cle = push_abonnements.config_cle_publique()
+
+    # Ordre des raisons : d'abord ce qui manque au serveur pour ENVOYER, ensuite
+    # ce qui manque au navigateur pour S'ABONNER.
+    raison = None
+    if not etat.configure:
+        raison = etat.raison
+    elif not cle.disponible:
+        raison = cle.raison
+
+    configure = bool(etat.configure and cle.disponible)
+    return {
+        "canal": etat.pour_api(),
+        "configure": configure,
+        # Base64url sans remplissage : c'est la forme attendue par
+        # `applicationServerKey` (le widget la convertit en octets).
+        "cle_publique": cle.cle,
+        "raison": raison,
+        "forme_cle": cle.forme,
+        "message": (
+            "push non configuré côté serveur : le widget ne propose pas les "
+            "notifications, aucun réglage n'est nécessaire côté visiteur"
+            if not configure
+            else "clé publique disponible : le widget peut proposer les "
+            "notifications, après consentement explicite du visiteur"
+        ),
+    }
 
 
 @router.post("/push/subscribe", response_model=None)
