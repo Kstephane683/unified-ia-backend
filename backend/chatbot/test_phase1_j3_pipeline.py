@@ -4,19 +4,54 @@ AgentRouter + ResponseGenerator + ActionExecutor
 
 Test du flux :
 User message → Intent → Agent routing → LLM response → Actions → DB
+
+⚠️  C'EST UN TEST D'INTÉGRATION, PAS UN TEST UNITAIRE.
+Il exige une BASE DE DONNÉES accessible ET un FOURNISSEUR LLM joignable : le
+pipeline complet écrit en base et appelle réellement le modèle. Il ne doit donc
+pas tourner avec la suite ordinaire, où il échouerait pour une raison sans
+rapport avec le code testé (pas de base, pas de clé).
+
+Il était par ailleurs IMPOSSIBLE À COLLECTER depuis l'origine : il importait
+`get_db_url`, qui n'a jamais existé dans `backend.core.database`. L'erreur
+d'import interrompait la collecte de TOUTE la suite pytest — aucun test ne
+pouvait donc s'exécuter. Le garde ci-dessous le sort de la collecte ordinaire,
+et le module reste utilisable à la main (menu interactif en fin de fichier).
+
+Pour l'exécuter :
+    RUN_TESTS_INTEGRATION=1 python3 -m pytest backend/chatbot/test_phase1_j3_pipeline.py
 """
 import asyncio
+import os
 import sys
 from pathlib import Path
+
+import pytest
+
+# Sort de la collecte ordinaire : ce module demande une base et un LLM.
+if os.getenv("RUN_TESTS_INTEGRATION") != "1":
+    pytest.skip(
+        "test d'intégration : exige une base de données et un LLM "
+        "(RUN_TESTS_INTEGRATION=1 pour l'activer)",
+        allow_module_level=True,
+    )
 
 # Ajouter le chemin parent pour les imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from backend.core.database import Base, get_db_url
+from backend.core.database import Base, DATABASE_URL
 from backend.chatbot.service import ChatbotService
 from backend.chatbot.models import ChatbotConversation, ChatbotMessage, ChatbotLead
+
+
+def get_db_url() -> str:
+    """URL de la base, telle que configurée dans `backend.core.database`.
+
+    Remplace l'import inexistant `from backend.core.database import get_db_url`
+    qui empêchait la collecte du module.
+    """
+    return DATABASE_URL
 
 
 async def test_pipeline_complete():
