@@ -20,4 +20,12 @@ echo "[smoke-test] Compilation py_compile de tous les fichiers modifiés..."
 python3 -m compileall -q backend/ > /dev/null
 echo "[smoke-test] Recherche de secrets dans les fichiers suivis..."
 python3 scripts/verifier-secrets.py
+echo "[smoke-test] Parité avec la copie Docker (contrat C12)..."
+if [ -d /home/ballo/OX6A/docker-unified/unified-ia-backend ]; then
+  python3 scripts/verifier-parite-docker.py
+else
+  echo "[smoke-test] ATTENTION — copie Docker absente sur cette machine : parité NON VÉRIFIÉE."
+  echo "[smoke-test] Le dossier docker-unified/ est le backend de remplacement de Railway :"
+  echo "[smoke-test] si tu travailles sur une autre machine, la parité doit être vérifiée sur celle qui l'héberge."
+fi
 echo "[smoke-test] PASS — push autorisé"
