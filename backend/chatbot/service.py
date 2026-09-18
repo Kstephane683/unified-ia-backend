@@ -23,6 +23,7 @@ from .context_builder import ContextBuilder
 from .agent_router import AgentRouter
 from .response_generator import ResponseGenerator
 from .action_executor import ActionExecutor
+from .blog_search import enrichir_contexte
 from .models import (
     ChatbotConversation,
     ChatbotMessage,
@@ -129,6 +130,9 @@ class ChatbotService:
             }
         """
         start_time = time.time()
+        # Articles du blog injectés dans cette réponse (tâche 6.8). Initialisé
+        # à None pour rester défini même si le pipeline échoue avant l'étape 3bis.
+        blog = None
         
         # Intent explicite du widget (clic sur une suggestion) — A.8.
         # Il est extrait AVANT toute écriture : ni la base ni le LLM ne voient
@@ -192,6 +196,26 @@ class ChatbotService:
                 message_history=message_history,
                 visitor_info=visitor_info
             )
+
+            # 3bis. Recherche blog (tâche 6.8) — ENRICHISSEMENT NON INTRUSIF.
+            #
+            # Trois propriétés voulues, dans cet ordre :
+            #   · `enrichir_contexte` n'appelle JAMAIS le réseau et n'attend
+            #     JAMAIS : si l'index n'est pas déjà en mémoire, elle renvoie
+            #     None et la conversation suit son cours normal ;
+            #   · elle n'échoue pas : toute erreur est absorbée à l'intérieur,
+            #     et le `try` ci-dessous est une seconde barrière — une
+            #     recherche cassée ne doit pas pouvoir casser une réponse ;
+            #   · sans résultat jugé pertinent, la clé n'est simplement pas
+            #     posée : Mia répond comme avant, sans savoir que la recherche
+            #     existe.
+            try:
+                blog = enrichir_contexte(message)
+                if blog:
+                    context['blog'] = blog
+                    context.setdefault('sources', []).append('blog')
+            except Exception as _blog_error:  # pragma: no cover - filet
+                print(f"[6.8] Recherche blog ignorée: {_blog_error}")
             
             # 4. Detect intent
             # Un intent explicite (clic sur une suggestion du widget) prime sur
@@ -326,7 +350,10 @@ class ChatbotService:
                 'suggestions': suggestions,
                 'actions': actions_executed,
                 'processing_time_ms': processing_time_ms,
-                'context_sources': context.get('sources', [])
+                'context_sources': context.get('sources', []),
+                # Articles du blog réellement fournis au modèle (tâche 6.8).
+                # None si la recherche n'a rien trouvé de pertinent.
+                'blog': blog
             }
         
         except Exception as e:

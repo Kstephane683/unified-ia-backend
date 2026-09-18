@@ -59,6 +59,10 @@ _RATE_LIMITS = {
     "/api/chatbot/message": (12, 60),      # coût LLM
     "/api/auth/register": (5, 300),        # spam de comptes
     "/api/auth/login": (10, 300),          # brute force
+    # Recherche blog (tâche 6.8) : aucun coût LLM, mais l'index est en mémoire
+    # et la route est publique — la limite borne l'abus sans gêner une saisie
+    # au fil de la frappe (1 requête par seconde en moyenne).
+    "/api/chatbot/search": (60, 60),
 }
 _rate_bucket: dict = defaultdict(deque)
 

@@ -5,10 +5,11 @@ Phase 1-S1.4 : Intégration frontend React 18 + Deep Chat avec backend 29 agents
 Routes:
 - POST /api/chatbot/message - Envoyer message (pipeline complet)
 - GET /api/chatbot/conversation/{id} - Historique conversation
+- GET /api/chatbot/search - Recherche dans les articles du blog (tâche 6.8)
 - POST /api/chatbot/sites/{site_id}/configure - Config multi-tenant (admin)
 - GET /api/chatbot/analytics/{site_id} - Métriques par site
 """
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ from ...core.database import get_db
 from ...chatbot.service import ChatbotService
 from ...chatbot.models import ChatbotConversation, ChatbotMessage, ChatbotSite
 from ...chatbot.vision import ImageInvalide, preparer_image, resume_pour_journal
+from ...chatbot import blog_search
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
@@ -200,6 +202,56 @@ class AnalyticsResponse(BaseModel):
     avg_messages_per_conversation: float
 
 
+class BlogSearchResult(BaseModel):
+    """Un article du blog, avec de quoi comprendre pourquoi il est remonté."""
+    slug: str
+    titre: str
+    description: str
+    url: str
+    collection: Optional[str] = None
+    collection_titre: Optional[str] = None
+    date: Optional[str] = None
+    tags: List[str] = []
+    # `score` et `couverture` sont exposés pour rendre le classement VÉRIFIABLE :
+    # sans eux, un résultat vide serait indiscernable d'un bug de classement.
+    score: float
+    couverture: float
+    termes_trouves: List[str] = []
+    #: `true` = l'article couvre réellement la question (seuils mesurés, cf.
+    #: `blog_search.py`). Le widget peut tout afficher et n'utiliser ce drapeau
+    #: que s'il veut distinguer « correspondance forte » et « correspondance
+    #: approchante ».
+    pertinent: bool = False
+
+
+class BlogSearchIndexState(BaseModel):
+    """État de l'index — date de génération et couverture, pour le diagnostic."""
+    disponible: bool
+    articles_indexes: Optional[int] = None
+    articles_avec_corps: Optional[int] = None
+    genere_le: Optional[str] = None
+    charge_il_y_a_s: Optional[int] = None
+    ttl_s: Optional[int] = None
+    source: Optional[str] = None
+    derniere_erreur: Optional[str] = None
+    raison: Optional[str] = None
+
+
+class BlogSearchResponse(BaseModel):
+    """
+    Réponse de recherche dans le blog (tâche 6.8).
+
+    Contrat : cette route répond TOUJOURS 200, même si l'index est absent ou
+    si le blog est injoignable. Une recherche indisponible n'est pas une
+    erreur du client ; c'est un état, décrit par `index` et par `message`.
+    """
+    requete: str
+    resultats: List[BlogSearchResult] = []
+    total: int = 0
+    message: Optional[str] = None
+    index: BlogSearchIndexState
+
+
 # ============================================================
 # ROUTES
 # ============================================================
@@ -309,6 +361,22 @@ async def send_message(
             "processing_time": result.get('processing_time_ms', 0),
             "human_active": result.get('human_active', False),
         }
+
+        # Articles du blog utilisés pour construire cette réponse (tâche 6.8).
+        # Champ ADDITIF et FACULTATIF : absent quand la recherche n'a rien
+        # trouvé de pertinent — le widget qui l'ignore ne voit aucune
+        # différence avec avant. Il ne contient que des données publiques
+        # (slug, titre, URL d'article) ; jamais de nom d'agent.
+        blog = result.get('blog') or {}
+        if blog.get('articles'):
+            metadata["blog_sources"] = [
+                {
+                    "slug": a.get("slug"),
+                    "titre": a.get("titre"),
+                    "url": a.get("url"),
+                }
+                for a in blog["articles"]
+            ]
         
         # Réponse rendue : `text` seul, `html` toujours null (contrat V2.2).
         # AVANT : un bloc HTML était généré dès qu'il y avait des suggestions —
@@ -344,6 +412,66 @@ async def send_message(
         return ChatbotMessageResponse(
             text="Désolé, une erreur s'est produite. Notre équipe a été notifiée. Pouvez-vous reformuler votre demande ?",
             metadata={"error": str(e)}        )
+
+
+#: Attente maximale du premier chargement de l'index, pour cette route
+#: uniquement. La conversation, elle, n'attend jamais (elle utilise l'index
+#: s'il est là, et s'en passe sinon).
+_ATTENTE_PREMIER_APPEL = 8.0
+
+
+@router.get("/search", response_model=BlogSearchResponse)
+async def search_blog(
+    q: str = Query(
+        "",
+        max_length=300,
+        description="Mots-clés de recherche (question du visiteur). Vide accepté.",
+    ),
+    limit: int = Query(
+        5, ge=1, le=20, description="Nombre de résultats souhaités (1 à 20)"
+    ),
+):
+    """
+    Rechercher dans les articles PUBLIÉS du blog ePerformance (tâche 6.8).
+
+    Sert l'onglet Aide du widget : le visiteur tape une question, on lui rend
+    les articles du blog qui y répondent, avec leur URL publique.
+
+    Fonctionnement :
+    - l'index est construit une fois puis gardé en mémoire (jamais reconstruit
+      à chaque requête) ; `index.genere_le` porte la date de génération de
+      `chatbot-index.json` côté blog ;
+    - la recherche est lexicale (BM25F, Python pur). Les embeddings ont été
+      écartés après mesure : aucun fournisseur d'embeddings n'est joignable
+      avec les clés du projet (détail dans `backend/chatbot/blog_search.py`) ;
+    - le premier appel peut attendre la construction de l'index quelques
+      secondes ; les suivants sont instantanés ;
+    - cette route ne renvoie JAMAIS 500 pour un problème d'index : elle
+      répond 200 avec `index.disponible = false` et un `message` explicite.
+
+    `q` est FACULTATIF à dessein : une question vide ou sans rapport doit
+    produire une réponse lisible (200 + `message`), pas une erreur de
+    validation — le widget envoie aussi des requêtes partielles pendant la
+    frappe. Aucun paramètre de cette route ne peut donc produire un 4xx.
+
+    Ne consomme aucun jeton LLM.
+    """
+    try:
+        resultat = blog_search.rechercher(
+            q, limite=limit, attendre=_ATTENTE_PREMIER_APPEL
+        )
+        return BlogSearchResponse(**resultat)
+    except Exception as exc:  # pragma: no cover - filet de sécurité
+        # Une recherche ne doit jamais produire d'erreur visible : on renvoie
+        # un état, pas une exception.
+        logger.error(f"Recherche blog en échec: {exc}", exc_info=True)
+        return BlogSearchResponse(
+            requete=q,
+            resultats=[],
+            total=0,
+            message="La recherche est momentanément indisponible.",
+            index=BlogSearchIndexState(disponible=False),
+        )
 
 
 @router.get("/conversation/{conversation_id}", response_model=ConversationHistoryResponse)

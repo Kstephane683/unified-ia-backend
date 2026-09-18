@@ -20,3 +20,9 @@ build/
 *.swp
 *.swo
 *~
+
+# Cache disque de l'index du blog (tâche 6.8) : regénéré automatiquement depuis
+# https://blog.eperformance.pro/chatbot-index.json. C'est un artefact
+# d'exécution, pas une source — il ne doit jamais être versionné, sinon il
+# divergerait silencieusement du blog.
+backend/chatbot/data/
