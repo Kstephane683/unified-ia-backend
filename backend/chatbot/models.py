@@ -252,9 +252,106 @@ class ChatbotAnalytics(Base):
         return f"<ChatbotAnalytics(id={self.id}, type={self.event_type}, site={self.site_id})>"
 
 
+class ChatbotPushSubscription(Base):
+    """
+    Abonnement au push navigateur — tâche 6.5.
+
+    Un abonnement est créé par le navigateur (celui du visiteur ou du
+    propriétaire, via le service worker du widget) et stocké ici pour être
+    réutilisé à chaque envoi. Les trois premiers champs sont ceux de la norme
+    Web Push : `endpoint` est l'URL du service de push du navigateur,
+    `cle_p256dh` et `cle_auth` sont les deux clés produites par le navigateur —
+    sans elles, le message ne peut pas être chiffré et le service de push le
+    refuse.
+
+    Aucune donnée personnelle n'est stockée : ni nom, ni e-mail, ni numéro.
+    L'identité d'un abonnement est son `endpoint`, lisible seulement par le
+    service de push du navigateur concerné.
+    """
+    __tablename__ = "chatbot_push_subscriptions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    endpoint = Column(Text, nullable=False, unique=True,
+                      comment='URL du service de push (identifie l\'abonnement)')
+    cle_p256dh = Column(Text, nullable=False, comment='Clé publique p256dh du navigateur')
+    cle_auth = Column(Text, nullable=False, comment='Secret d\'authentification du navigateur')
+
+    # Contexte (facultatif, pour le diagnostic et le ciblage)
+    site_id = Column(String(100), nullable=True, index=True, comment='Site concerné')
+    libelle = Column(String(200), nullable=True,
+                     comment='Libellé lisible (ex. « Chrome bureau ») — jamais un nom de personne')
+    user_agent = Column(Text, nullable=True, comment='User agent au moment de l\'abonnement')
+
+    # Cycle de vie
+    est_actif = Column(Boolean, default=True, index=True,
+                       comment='Désactivé si le service de push renvoie 404/410 (abonnement expiré)')
+    derniere_reussite = Column(TIMESTAMP, nullable=True, comment='Dernier envoi réussi')
+    dernier_echec = Column(TIMESTAMP, nullable=True, comment='Dernier échec d\'envoi')
+    dernier_message_erreur = Column(Text, nullable=True, comment='Motif du dernier échec')
+
+    created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
+    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                        onupdate=func.current_timestamp())
+
+    def __repr__(self):
+        return f"<ChatbotPushSubscription(id={self.id}, actif={self.est_actif})>"
+
+
+class ChatbotNotificationLog(Base):
+    """
+    Trace d'un envoi de notification — tâche 6.5.
+
+    POURQUOI CETTE TABLE EXISTE. Sans elle, un envoi qui ne part pas ne laisse
+    aucune trace : l'appelant reçoit une erreur, la relit une fois, et il ne
+    reste rien. Le propriétaire ne peut alors ni constater le problème, ni
+    savoir combien d'envois ont échoué, ni pourquoi.
+
+    Une ligne est écrite DANS TOUS LES CAS, y compris quand le canal n'est pas
+    configuré : c'est le cas le plus important à pouvoir constater après coup.
+
+    Contenu volontairement borné : le corps du message est tronqué
+    (`NOTIF_TRACE_CORPS`). La trace dit ce qui a été envoyé et s'il est parti ;
+    elle n'est pas une archive de contenu.
+    """
+    __tablename__ = "chatbot_notification_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    canal = Column(String(30), nullable=False, index=True,
+                   comment='telegram | email | webpush | whatsapp')
+    #: « non_configure » n'est PAS un échec d'envoi : c'est un envoi qui n'a
+    #: jamais été tenté faute de configuration. La distinction est essentielle
+    #: au diagnostic — les deux ne se réparent pas de la même façon.
+    statut = Column(String(20), nullable=False, index=True,
+                    comment='envoye | echec | non_configure')
+    succes = Column(Boolean, nullable=False, index=True, comment='Vrai si l\'envoi a abouti')
+
+    destinataire = Column(String(500), nullable=True,
+                          comment='Destinataire (chat_id, e-mail, ou nombre d\'abonnements)')
+    sujet = Column(String(200), nullable=True, comment='Sujet de la notification')
+    corps = Column(Text, nullable=True, comment='Corps envoyé, tronqué (traçabilité)')
+
+    code_erreur = Column(String(100), nullable=True, comment='Code HTTP ou type d\'exception')
+    erreur = Column(Text, nullable=True, comment='Motif lisible de l\'échec')
+    identifiant_fournisseur = Column(String(200), nullable=True,
+                                     comment='Identifiant du message chez le fournisseur')
+
+    auteur = Column(String(200), nullable=True, comment='Compte admin ayant déclenché l\'envoi')
+    duree_ms = Column(Integer, nullable=True, comment='Durée de l\'appel au fournisseur')
+
+    created_at = Column(TIMESTAMP, server_default=func.current_timestamp(), index=True,
+                        comment='Moment de la tentative')
+    envoye_le = Column(TIMESTAMP, nullable=True, comment='Moment de l\'envoi effectif')
+
+    def __repr__(self):
+        return f"<ChatbotNotificationLog(id={self.id}, canal={self.canal}, statut={self.statut})>"
+
+
 # Indexes composés pour optimisation des requêtes
 Index('idx_conversations_site_status', ChatbotConversation.site_id, ChatbotConversation.status)
 Index('idx_conversations_site_started', ChatbotConversation.site_id, ChatbotConversation.started_at)
 Index('idx_messages_conversation_created', ChatbotMessage.conversation_id, ChatbotMessage.created_at)
 Index('idx_leads_site_created', ChatbotLead.site_id, ChatbotLead.created_at)
 Index('idx_analytics_site_type_timestamp', ChatbotAnalytics.site_id, ChatbotAnalytics.event_type, ChatbotAnalytics.timestamp)
+Index('idx_notifications_canal_created', ChatbotNotificationLog.canal, ChatbotNotificationLog.created_at)
+Index('idx_notifications_statut_created', ChatbotNotificationLog.statut, ChatbotNotificationLog.created_at)

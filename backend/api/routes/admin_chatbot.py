@@ -6,6 +6,7 @@ Dashboard admin (web + mobile PWA) pour:
 - Prendre la main (takeover humain) et rendre la main à l'IA
 - Envoyer des messages humains (le LLM est en pause sur la conversation)
 - Assigner manuellement un agent IA (override du router)
+- Envoyer des notifications et consulter leur trace (tâche 6.5)
 
 Auth: JWT existant (POST /api/auth/login) + role admin requis.
 Sans migration DB: human_active et assigned_agent vivent dans
@@ -16,15 +17,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm.attributes import flag_modified
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.core.auth import get_current_user
 from backend.core.database import get_db
 from backend.core.models import User
-from backend.chatbot.models import ChatbotConversation, ChatbotLead, ChatbotMessage
+from backend.chatbot.models import (
+    ChatbotConversation,
+    ChatbotLead,
+    ChatbotMessage,
+    ChatbotNotificationLog,
+    ChatbotPushSubscription,
+)
+from backend.chatbot import notifications
 
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
@@ -544,3 +553,282 @@ async def list_agents_admin(
 
     agents.sort(key=lambda a: (a["category"], a["key"]))
     return {"agents": agents, "total": len(agents)}
+
+
+# ============================================================
+# NOTIFICATIONS — tâche 6.5
+# ============================================================
+#
+# CODES HTTP CHOISIS, et pourquoi ils ne sont pas tous 200 :
+#
+#   200  l'envoi a abouti.
+#   503  le canal n'est PAS CONFIGURÉ (clés absentes). Ce n'est pas une panne
+#        du serveur, mais ce n'est pas un succès non plus : renvoyer 200 ici
+#        ferait croire à un envoi parti. Le corps porte l'état exact du canal.
+#   502  le canal EST configuré mais le fournisseur a refusé (clé invalide,
+#        IP non autorisée, destinataire inconnu). C'est une défaillance d'une
+#        dépendance externe — la définition même du 502.
+#
+# Dans les trois cas, la tentative est TRACÉE en base, et le corps de la
+# réponse contient le résultat complet. Aucun de ces chemins ne peut lever
+# une exception : `notifications.envoyer()` ne lève jamais.
+
+
+class NotifyRequest(BaseModel):
+    """Demande d'envoi d'une notification."""
+    canal: str = Field(
+        ...,
+        description="telegram | email | webpush | whatsapp",
+        examples=["telegram"],
+    )
+    message: str = Field(..., min_length=1, max_length=4000, description="Corps du message")
+    sujet: str = Field("", max_length=200, description="Sujet (objet de l'e-mail, 1re ligne Telegram)")
+    destinataire: Optional[str] = Field(
+        None,
+        description=(
+            "Destinataire. Vide = valeur par défaut du canal "
+            "(TELEGRAM_ADMIN_CHAT_ID pour Telegram, tous les abonnements actifs pour webpush)."
+        ),
+    )
+    site_id: Optional[str] = Field(None, max_length=100, description="Site concerné (traçabilité)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "canal": "telegram",
+                "sujet": "Nouveau lead",
+                "message": "Un visiteur a demandé un diagnostic.",
+                "site_id": "eperformance_vitrine",
+            }
+        }
+
+
+class PushSubscriptionRequest(BaseModel):
+    """Enregistrement d'un abonnement au push navigateur."""
+    endpoint: str = Field(..., min_length=10, description="URL du service de push")
+    cle_p256dh: str = Field(..., min_length=10, description="Clé publique p256dh du navigateur")
+    cle_auth: str = Field(..., min_length=5, description="Secret d'authentification du navigateur")
+    libelle: Optional[str] = Field(None, max_length=200, description="Libellé lisible")
+    site_id: Optional[str] = Field(None, max_length=100)
+
+
+@router.get("/notifications")
+async def lister_notifications(
+    canal: Optional[str] = Query(None, description="Filtrer par canal"),
+    statut: Optional[str] = Query(
+        None, description="Filtrer par statut : envoye | echec | non_configure"
+    ),
+    limit: int = Query(50, ge=1, le=200, description="Nombre de lignes (1 à 200)"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Trace des notifications et ÉTAT DES CANAUX (tâche 6.5).
+
+    Répond à deux questions d'un coup, parce qu'elles se posent ensemble :
+      1. « Qu'est-ce qui est parti, à qui, quand, et est-ce que c'est passé ? »
+         → `notifications` (les plus récentes d'abord) ;
+      2. « Pourquoi rien ne part ? » → `canaux`, qui dit pour chaque canal s'il
+         est configuré et, sinon, quelle variable manque.
+
+    Le second point est le plus important en pratique : sans lui, un canal non
+    configuré ne produit qu'un silence.
+    """
+    require_admin(current_user)
+
+    requete = db.query(ChatbotNotificationLog)
+    if canal:
+        requete = requete.filter(ChatbotNotificationLog.canal == canal)
+    if statut:
+        requete = requete.filter(ChatbotNotificationLog.statut == statut)
+    lignes = (
+        requete.order_by(ChatbotNotificationLog.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    # Résumé par statut sur TOUT l'historique, pas seulement la page affichée :
+    # c'est le chiffre qui dit si un canal ne fonctionne plus.
+    from sqlalchemy import func as sa_func
+
+    resume = {
+        statut_ligne: total
+        for statut_ligne, total in db.query(
+            ChatbotNotificationLog.statut, sa_func.count(ChatbotNotificationLog.id)
+        )
+        .group_by(ChatbotNotificationLog.statut)
+        .all()
+    }
+
+    return {
+        "canaux": [etat.pour_api() for etat in notifications.etat_canaux()],
+        "notifications": [
+            {
+                "id": ligne.id,
+                "canal": ligne.canal,
+                "statut": ligne.statut,
+                "succes": ligne.succes,
+                "destinataire": ligne.destinataire,
+                "sujet": ligne.sujet,
+                "corps": ligne.corps,
+                "code_erreur": ligne.code_erreur,
+                "erreur": ligne.erreur,
+                "identifiant_fournisseur": ligne.identifiant_fournisseur,
+                "auteur": ligne.auteur,
+                "duree_ms": ligne.duree_ms,
+                "created_at": ligne.created_at.isoformat() if ligne.created_at else None,
+                "envoye_le": ligne.envoye_le.isoformat() if ligne.envoye_le else None,
+            }
+            for ligne in lignes
+        ],
+        "total": len(lignes),
+        "resume": {
+            "envoye": resume.get("envoye", 0),
+            "echec": resume.get("echec", 0),
+            "non_configure": resume.get("non_configure", 0),
+        },
+        "abonnements_push_actifs": db.query(sa_func.count(ChatbotPushSubscription.id))
+        .filter(ChatbotPushSubscription.est_actif.is_(True))
+        .scalar()
+        or 0,
+    }
+
+
+@router.post("/admin/notify")
+async def envoyer_notification(
+    corps: NotifyRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Envoyer une notification par un canal configuré (tâche 6.5).
+
+    L'état du canal est vérifié AVANT l'envoi : si les clés manquent, la
+    réponse le dit (503 + `canaux`) et l'envoi n'est pas tenté. La tentative
+    est tracée dans les trois cas (succès, échec, non configuré).
+
+    Aucune exception ne peut remonter de cette route : `envoyer()` renvoie un
+    résultat, et `tracer()` absorbe ses propres erreurs.
+    """
+    require_admin(current_user)
+
+    canal = (corps.canal or "").strip().lower()
+
+    # Abonnements actifs, uniquement pour le push : c'est le seul canal dont le
+    # destinataire n'est pas une adresse mais un ensemble d'abonnements.
+    abonnements = None
+    if canal == "webpush":
+        abonnements = (
+            db.query(ChatbotPushSubscription)
+            .filter(ChatbotPushSubscription.est_actif.is_(True))
+            .all()
+        )
+
+    resultat = notifications.envoyer(
+        canal=canal,
+        destinataire=(corps.destinataire or "").strip(),
+        sujet=corps.sujet or "",
+        message=corps.message,
+        abonnements=abonnements,
+    )
+
+    # Trace dans TOUS les cas. `auteur` = le compte admin qui a déclenché.
+    notifications.tracer(
+        db,
+        resultat,
+        sujet=corps.sujet or "",
+        message=corps.message,
+        auteur=current_user.get("email"),
+    )
+
+    corps_reponse = {
+        "resultat": resultat.pour_api(),
+        "site_id": corps.site_id,
+        "canaux": [etat.pour_api() for etat in notifications.etat_canaux()],
+    }
+
+    if resultat.statut == "non_configure":
+        return JSONResponse(status_code=503, content=corps_reponse)
+    if not resultat.succes:
+        return JSONResponse(status_code=502, content=corps_reponse)
+    return corps_reponse
+
+
+@router.post("/admin/push/subscriptions")
+async def enregistrer_abonnement_push(
+    corps: PushSubscriptionRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Enregistrer un abonnement au push navigateur (tâche 6.5).
+
+    Un abonnement est normalement créé par le service worker du navigateur, et
+    non par un administrateur. Cet endpoint est donc PROVISOIRE : il existe
+    pour que la chaîne (abonnement → stockage → envoi) soit complète et
+    testable dès maintenant, alors qu'aucune clé VAPID n'existe en production.
+    Le jour où le widget implémentera son côté, cette route sera complétée par
+    une route publique équivalente, appelée par le navigateur.
+
+    Refus explicite (503) si le push n'est pas configuré : accepter un
+    abonnement qu'on ne pourra jamais servir ne ferait qu'accumuler des lignes
+    inutiles et donnerait une fausse impression de fonctionnement.
+    """
+    require_admin(current_user)
+
+    etat = notifications.etat_canal("webpush")
+    if not etat.configure:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "abonnement": None,
+                "canal": etat.pour_api(),
+                "message": (
+                    "Push non configuré : l'abonnement n'est pas enregistré. "
+                    "Renseigner VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY et ajouter "
+                    "'pywebpush' à requirements.txt."
+                ),
+            },
+        )
+
+    existant = (
+        db.query(ChatbotPushSubscription)
+        .filter(ChatbotPushSubscription.endpoint == corps.endpoint)
+        .first()
+    )
+    if existant:
+        # Le navigateur peut régénérer ses clés pour un même endpoint : on
+        # remplace les clés et on réactive, plutôt que de créer un doublon
+        # (l'endpoint est unique en base).
+        existant.cle_p256dh = corps.cle_p256dh
+        existant.cle_auth = corps.cle_auth
+        existant.libelle = corps.libelle or existant.libelle
+        existant.site_id = corps.site_id or existant.site_id
+        existant.est_actif = True
+        abonnement = existant
+        cree = False
+    else:
+        abonnement = ChatbotPushSubscription(
+            endpoint=corps.endpoint,
+            cle_p256dh=corps.cle_p256dh,
+            cle_auth=corps.cle_auth,
+            libelle=corps.libelle,
+            site_id=corps.site_id,
+            est_actif=True,
+        )
+        db.add(abonnement)
+        cree = True
+
+    db.commit()
+    db.refresh(abonnement)
+
+    return {
+        "abonnement": {
+            "id": abonnement.id,
+            "libelle": abonnement.libelle,
+            "site_id": abonnement.site_id,
+            "est_actif": abonnement.est_actif,
+            "cree": cree,
+        },
+        "canal": etat.pour_api(),
+    }
