@@ -159,6 +159,11 @@ class ChatbotService:
                 visitor_info=visitor_info
             )
 
+            # Photos AVANT traitement (B4) : les déclencheurs de notification
+            # (nouveau lead, escalade) comparent l'état APRÈS à celui-ci.
+            lead_captured_avant = bool(conversation.lead_captured)
+            statut_avant = conversation.status
+
             # 1bis. Takeover humain: le LLM est en pause sur cette conversation,
             # on enregistre le message et on signale au widget que l'humain parle.
             conv_meta = conversation.conversation_metadata or {}
@@ -312,6 +317,25 @@ class ChatbotService:
                 },
                 visitor_info=visitor_info
             )
+
+            # 10ter. Déclencheurs de notification du PROPRIÉTAIRE (B4) —
+            # nouveau lead, escalade humaine, nouveau visiteur. Asynchrone et
+            # NON BLOQUANT : le visiteur n'attend aucun envoi ; le module ne
+            # lève jamais (tout est absorbé et journalisé). Aucun nom d'agent
+            # n'apparaît dans les notifications (règle produit).
+            try:
+                from . import declencheurs
+                declencheurs.traiter_apres_message(
+                    db=self.db,
+                    site_id=site_id,
+                    conversation_id=conversation_id,
+                    est_nouvelle_conversation=is_new_conversation,
+                    lead_captured_avant=lead_captured_avant,
+                    statut_avant=statut_avant,
+                    actions=actions_executed,
+                )
+            except Exception as _declenchement_erreur:  # pragma: no cover
+                print(f"[B4] déclencheurs ignorés: {_declenchement_erreur}")
 
             # 10bis. Clic sur une suggestion (A.8) — donnée commerciale.
             # Le widget joint `visitor_info.suggestion_click`

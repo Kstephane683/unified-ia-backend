@@ -21,3 +21,10 @@ pillow==10.1.0
 # dépendances ci-dessus (résolution pip complète ; preuve brute dans
 # docs/phase3-push-subscribe/RAPPORT.md). Exige Python >= 3.10.
 pywebpush==2.5.0
+# 2FA TOTP (refonte app Mia, chantier B2). Importé PARESSEUSEMENT, à
+# l'intérieur des fonctions de vérification — même règle que pywebpush :
+# son absence est un état géré, jamais une panne de démarrage (leçon de
+# l'incident du 17/09). Version vérifiée installable en venv vierge,
+# sans aucune dépendance transitive (preuve dans
+# docs/refonte-app-mia/API-CLIENT-V1.md §12).
+pyotp==2.9.0
