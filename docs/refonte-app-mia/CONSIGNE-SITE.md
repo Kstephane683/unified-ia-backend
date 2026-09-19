@@ -1,7 +1,7 @@
 # CONSIGNE SITE — Refonte UI/UX de l'app Mia (SaaS de gestion) + landing sectorielle
 
-**Émetteur** : agent CHATBOT · **Destinataire** : agent SITE · **Date** : 2026-09-19
-**Statut** : ⚠️ DEMANDE déposée au journal — **à ne commencer qu'après B1-B3** (voir §6), les écrans doivent être conçus sur des données réelles.
+**Émetteur** : agent CHATBOT · **Destinataire** : agent SITE · **Date** : 2026-09-19 (v2 de passation)
+**Statut** : ⚠️ DEMANDE déposée au journal — **toutes les dépendances sont LIVRÉES** (voir §6 mis à jour). SITE conçoit la LP **et** l'app ; CHATBOT ne conçoit pas (décision du propriétaire : passation complète).
 
 ---
 
@@ -77,6 +77,27 @@ Le détail est dans `PLAN-COMPLET.md` §4 — structure finale :
 2. Le **rapport** de refonte : écrans livrés, mesures (Lighthouse, contrastes), captures avant/après, ce qui reste.
 3. **Au journal** : entrée de départ, entrées d'étape, et toute ⚠️ DEMANDE si un contrat est touché.
 
-## 6. La dépendance de données (B1-B3, ma part)
+## 6. Les dépendances — TOUTES LIVRÉES (état de passation)
 
-Les écrans 1 (connexion), 2 (Accueil), 3-4 (conversations), 6 (Analytics), 7 (Configuration), 8 (Compétences), 9 (Horaires) et le RGPD ont besoin des chantiers backend **B1 (provisionnement), B2 (rôles/scoping), B3 (API client v1)** — **je les livre avant que la conception ne se fige**. Je poste au journal à chaque livraison ; la conception peut démarrer sur les maquettes (les données ne changent pas la structure des écrans, seulement leur alimentation). Les définitions exactes des endpoints seront déposées au journal au fur et à mesure — la structure des données est déjà dans `PLAN-COMPLET.md` §3.1 (colonne « Source de données »).
+| Dépendance | État | Où |
+|---|---|---|
+| **B1 provisionnement** | ✅ livré | `POST /api/chatbot/admin/clients` (admin, mot de passe temporaire renvoyé **une seule fois**), `must_change_password` forcé, `POST /api/client/v1/password`, `remember_me` (jeton 30 j) |
+| **B2 rôles + 2FA + audit** | ✅ livré | `require_site_owner` (admin > client_admin > client_operator > client_reader, isolation **404** jamais 403), 2FA TOTP (`pyotp`, secret **chiffré** en base), table `audit_log` + `GET /api/chatbot/admin/audit` |
+| **B3 API client v1** | ✅ livré | préfixe `/api/client/v1` — 31 endpoints documentés dans **`API-CLIENT-V1.md`** (le contrat que tu consommes) ; `orders` répond un état explicite « non branché » (règle C2) ; RGPD export + suppression par conversation |
+| **B4 déclencheurs** | ✅ livré | lead / escalade / nouveau visiteur → push + in-app (`client_notifications`), réglages par type (`ChatbotSite.notification_settings`), asynchrone non bloquant |
+| **Contenu sectoriel** | ✅ livré | dépôt `eperformance-mia` : `contenu-sectoriel.json` **généré** depuis `agent-ia-web/eperf_core/sectors.py` (12 secteurs, intention + `faq_themes` réels) — ne jamais réécrire à la main |
+| **Dépôt LP + Pages** | ✅ livré | dépôt dédié `Kstephane683/eperformance-mia` — **décision argumentée** dans son README ; Pages actif, sert `https://mia.eperformance.pro/` |
+| **Custom domain + HTTPS** | ✅ livré | CNAME posé par le propriétaire, domaine configuré côté GitHub, **HTTPS enforced** (vérifié : HTTP 200 sur le domaine) |
+| **Vidéos muettes** | ✅ livré | `videos/` dans le dépôt — hero-loop, démo, tuto installation, tuto app (Playwright + ffmpeg, MP4 + WebM, durées/poids mesurés) — décision du propriétaire : **sans voix générée** |
+| **Garde-fous du dépôt** | ✅ livré | `eperformance-mia` : hook pre-push secrets + **Actions CI**, empreinte eperf.css, contrôles structurels (adaptés à l'état de passation — ils retargeteront automatiquement `index.html` quand ta LP arrivera) |
+| **LP v1 CHATBOT** | 🗄️ **archivée** | retirée de `main` (page d'attente en place) ; `docs/archive/index-lp-v1.html` + branche `archive/lp-v1-chatbot` = **référence de contenu, pas un modèle de conception** |
+
+**Règle d'usage du dépôt `eperformance-mia`** : main = ta LP quand elle sera prête ; d'ici là la page d'attente sert le domaine. Les garde-fous (secrets, empreinte, structure) t'accompagnent : le contrôle de structure cible automatiquement ton `index.html` dès qu'il ne contient plus la mention de préparation.
+
+## 7. La conception — exigences du propriétaire (transmises mot pour mot)
+
+- **L'app doit être PUISSANTE** (pas basique, pas générique), **facile** (onboarding clair), avec des **wow moments** (transitions, animations, micro-interactions), un **design premium** (jetons `eperf.css` canoniques), **cohérente avec le widget visiteur**.
+- **La rapidité d'exécution est une priorité absolue** : fluide, réactive, sans latence perçue. Performance mobile = non négociable. Ne la prends pas à la légère.
+- **Référence structurale — les captures de l'app Jèko** : `toolkit_eperformance/eperformance-widget/docs/refonte-app-mia/references-visuelles/` (7 captures + README). Reprise possible de la **structure** : navigation basse à 4 onglets + bouton central d'action, KPIs en gros, actions rapides sur carte surélevée, paramètres en catégories, écran support, état vide clair. **NE PAS s'y limiter, NE PAS cloner** : design system et couleurs = `eperf.css` canonique, pas celles de Jèko. Mobilise tous tes skills et sous-agents pour auditer options, stack, frameworks, proposer des approches modernes, valider les choix, puis exécuter.
+- **Les obligations RGPD sont bloquantes** (C4) : mention sous-traitant, droit d'accès/suppression du visiteur final (les endpoints B3 existent), rétention visible, cache hors-ligne **chiffré**, consentement explicite avant toute notification.
+- **La règle C2 est bloquante** : « Mia répond » ≠ « Mia exécute » — ne jamais vendre comme existant ce qui ne l'est pas.
