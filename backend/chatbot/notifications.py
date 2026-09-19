@@ -304,6 +304,24 @@ def _envoyer_email(destinataire: str, sujet: str, message: str) -> ResultatEnvoi
     expediteur = _variable("BREVO_SENDER_EMAIL")
     nom_expediteur = _variable("BREVO_SENDER_NAME") or "ePerformance"
 
+    # RÉPARÉ LE 19/09 : sans destinataire explicite, le payload partait avec
+    # `to: [{"email": ""}]` et Brevo répondait 400 « email is missing in to » —
+    # présenté comme un 502 « échec » alors que la configuration était incomplète,
+    # pas fausse. Le destinataire par défaut est BREVO_NOTIF_EMAIL ; sans lui,
+    # le canal répond « non configuré » (même philosophie que les autres canaux) :
+    # un état explicite vaut mieux qu'un échec d'envoi qui ne dit pas sa cause.
+    if not destinataire:
+        destinataire = _variable("BREVO_NOTIF_EMAIL")
+    if not destinataire:
+        return ResultatEnvoi(
+            canal="email",
+            succes=False,
+            statut="non_configure",
+            destinataire="",
+            code_erreur=None,
+            erreur="aucun destinataire : passez `destinataire` ou définissez BREVO_NOTIF_EMAIL",
+        )
+
     corps_html = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     corps_html = corps_html.replace("\n", "<br>")
     corps_html = (
