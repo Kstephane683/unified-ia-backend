@@ -70,3 +70,60 @@ La valeur reste dans l'**historique git** du dépôt public du site, où elle a 
 ## 6. Le lot 2, prêt
 
 `/home/ballo/EP-PROD-JETONS-LOT2.txt` — permissions `0600`, hors de tout dépôt. Contient les 4 jetons (1 scission + 3 constantes devinables), leurs empreintes, les clients de chacun et l'ordre des poses. Vérifié : aucun des quatre n'apparaît dans une arborescence de dépôt ni dans un script.
+
+---
+
+## 7. Scission `CRON_KEY` / `API_BEARER_TOKEN`
+
+**Fait** : nouveau `API_BEARER_TOKEN` généré, consigné **hors dépôt** dans `/home/ballo/EP-PROD-JETON-BEARER.txt` (`0600`) avec la valeur, l'empreinte, la raison, les clients et l'ordre. **`CRON_KEY` ne change pas** — l'URL de la tâche planifiée cPanel la porte déjà.
+
+Deux fichiers portaient la même valeur (lot 2 et le fichier dédié) : la valeur a été **retirée du lot 2**, qui y renvoie désormais. **Un secret, un fichier** — deux sources pour un même secret reproduiraient exactement le défaut que nous venons de supprimer avec les copies du journal de coordination.
+
+### Clients de `API_BEARER_TOKEN` — identifiés nommément
+
+**1. n8n — cinq workflows portent le jeton en clair dans leurs nœuds** (lus dans `n8n-compose/n8n_data/database.sqlite`) :
+
+| Workflow | État | Nœud concerné |
+|---|---|---|
+| `Meta Webhook — Réponses & Statuts (ePerformance)` | **ACTIF** | « Réponse prospect ? » — en-tête `Authorization` |
+| `prospect-manuel` | inactif | `HTTP Request` / `Authorization` |
+| `WhatsApp Sequences J0-J3-J7 (ePerformance)` | inactif (2 versions) | nœud `api_token` |
+| `WhatsApp Séquence J+3 (ePerformance)` | inactif | nœud `api_token` |
+| `WhatsApp Séquence J+7 (ePerformance)` | inactif | nœud `api_token` |
+
+Le workflow **actif envoie l'ancienne valeur** : les réponses aux webhooks Meta sont cassées depuis la bascule. Les quatre inactifs sont des **pièges à retardement** — à corriger en même temps, sinon ils échoueront silencieusement le jour où on les réactive.
+
+Une credential `[httpHeaderAuth] « Header Auth account »` existe également ; sa valeur est **chiffrée** et illisible hors de l'interface n8n — à vérifier là-bas.
+
+**2. L'outillage du toolkit** — `prospect_scraper.py`, `prospect_app.py`, `content_engine.py` : replis codés en dur de l'ancienne valeur, à **retirer**. **8 occurrences restantes**, périmètre SOCIAL.
+
+---
+
+## 8. Les trois constantes devinables
+
+Décision du propriétaire : on les tourne. Quatre jetons générés (dont celui de la scission), consignés hors dépôt, avec leurs clients.
+
+| Constante | Clients mesurés | Repli codé en dur |
+|---|---|---|
+| `ADMIN_TOKEN` | agent-ia-web : `deliver.py`, `notifications.py` ; serveur : `proxy.php` (`maj_livraison_site`) | non |
+| `CHATBOT_API_TOKEN` | agent-ia-web : `artisan.py`, `api/chatbot_register.php` | non |
+| `MOBILE_API_TOKEN` | **aucun client dans les dépôts** — appelant externe | non |
+
+### `MOBILE_API_TOKEN` — ne pas le tourner avant d'avoir mesuré
+
+C'est le seul dont le consommateur n'est pas identifiable depuis les dépôts. Le tourner sans lui **couperait l'API mobile**.
+
+**Méthode : mesurer le trafic, pas deviner.**
+- cPanel → **Metrics → Raw Access Logs**, ou en SSH : `grep api_mobile.php ~/logs/*access*log | awk '{print $1, $12}' | sort | uniq -c | sort -rn | head`
+- **Si aucun appel n'apparaît sur 30 jours, l'endpoint n'a pas de client** — le tourner (ou le désactiver) ne coupe rien. C'est la seule façon de trancher sans risque.
+- Variante : journaliser temporairement l'IP et le `User-Agent` dans `api_mobile.php`, puis relire après quelques jours.
+
+### Fichiers de configuration à mettre à jour
+
+Cinq fichiers non publiés portent ces constantes **en clair** : `Eperformance/.env`, `notifications/config-notifications.php`, `gen-admin-token.php`, `agent-ia-web/.env`. Périmètres **SOCIAL** et **NOYAU** — consignes déposées, aucun correctif écrit depuis mon périmètre.
+
+---
+
+## 9. Bilan du nettoyage
+
+**42 occurrences** de l'ancienne valeur subsistent dans les dépôts **non publiés** (toolkit, agent-ia-web), et **8 replis codés en dur**. Ce n'est plus une fuite — la valeur est morte et ces dépôts n'ont pas de remote — c'est du nettoyage. Mais tant que les replis sont là, les outils enverront une valeur morte **sans le dire**.
