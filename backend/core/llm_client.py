@@ -112,35 +112,23 @@ class LLMClient:
     
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """
-        Charger la configuration depuis config_ia.json ou variables d'environnement
-        
+        Charger la configuration depuis les variables d'environnement ou config_ia.json
+
         Priorité:
-        1. Fichier config_ia.json (dev local)
-        2. Variables d'environnement (Railway, production)
+        1. Variables d'environnement (Railway, Docker, production)
+        2. Fichier config_ia.json (repli, développement local)
+
+        POURQUOI CET ORDRE — ne pas l'inverser sans lire ceci.
+        L'ordre inverse (fichier d'abord) rendait la configuration DESTRUCTIBLE
+        EN SILENCE : `json.loads()` était retourné sans condition dès que le
+        fichier existait et se parsait, si bien qu'un config_ia.json présent
+        mais vide (`{}`) ou dépourvu de clés court-circuitait l'environnement —
+        le backend démarrait alors sans aucune clé, sans erreur et sans trace.
+        C'est le défaut qui rendait dangereuse la purge de config_ia.json
+        prévue par la refonte du toolkit (condition bloquante D8).
+        Un fichier sans clé exploitable ne court-circuite plus rien : il est
+        traité comme absent.
         """
-        if config_path:
-            config_file = Path(config_path)
-        else:
-            # Chercher dans plusieurs emplacements
-            possible_paths = [
-                Path(__file__).parent.parent.parent.parent / "toolkit_eperformance" / "config_ia.json",
-                Path("/home/ballo/OX6A/toolkit_eperformance/config_ia.json"),
-                Path(__file__).parent / "config_ia.json",
-            ]
-            config_file = None
-            for path in possible_paths:
-                if path.exists():
-                    config_file = path
-                    break
-        
-        # Tenter de charger depuis fichier
-        if config_file and config_file.exists():
-            try:
-                return json.loads(config_file.read_text())
-            except Exception as e:
-                print(f"⚠️  Erreur lecture config_ia.json: {e}", file=sys.stderr)
-        
-        # Fallback sur variables d'environnement (Railway)
         env_config = {
             'api_keys': {
                 'deepseek': os.getenv('DEEPSEEK_API_KEY', ''),
@@ -153,20 +141,58 @@ class LLMClient:
             },
             'provider': os.getenv('DEFAULT_LLM_PROVIDER', 'deepseek')
         }
-        
-        # Vérifier si au moins une clé API est présente
-        has_keys = any([
-            env_config['api_keys']['deepseek'],
-            env_config['api_keys']['openai'],
-            env_config['claude_gateway']['api_key']
-        ])
-        
-        if has_keys:
-            print(f"✅ Configuration LLM chargée depuis variables d'environnement", file=sys.stderr)
+
+        if self._a_des_cles(env_config):
+            print("✅ Configuration LLM chargée depuis variables d'environnement", file=sys.stderr)
             return env_config
-        
-        print(f"⚠️  config_ia.json non trouvé et aucune variable d'environnement", file=sys.stderr)
+
+        config_file = self._trouver_config(config_path)
+        if config_file:
+            try:
+                depuis_fichier = json.loads(config_file.read_text())
+            except Exception as e:
+                print(f"⚠️  Erreur lecture config_ia.json: {e}", file=sys.stderr)
+            else:
+                if self._a_des_cles(depuis_fichier):
+                    print(f"✅ Configuration LLM chargée depuis {config_file}", file=sys.stderr)
+                    return depuis_fichier
+                print(f"⚠️  {config_file} ne porte aucune clé exploitable — ignoré, "
+                      "l'environnement n'a pas été court-circuité", file=sys.stderr)
+
+        print("⚠️  Aucune clé LLM : ni variable d'environnement, ni config_ia.json exploitable",
+              file=sys.stderr)
         return {}
+
+    @staticmethod
+    def _a_des_cles(config: Dict) -> bool:
+        """Vrai si la configuration porte au moins une clé utilisable.
+
+        Sert de garde : une configuration vide ne doit jamais être retournée
+        comme si elle était valide, sinon l'absence de clé devient silencieuse.
+        """
+        if not isinstance(config, dict):
+            return False
+        cles = config.get('api_keys') or {}
+        passerelle = config.get('claude_gateway') or {}
+        return bool(
+            (isinstance(cles, dict) and (cles.get('deepseek') or cles.get('openai')))
+            or (isinstance(passerelle, dict) and passerelle.get('api_key'))
+        )
+
+    @staticmethod
+    def _trouver_config(config_path: Optional[str]) -> Optional[Path]:
+        """Localiser config_ia.json : chemin explicite, sinon emplacements connus."""
+        if config_path:
+            chemin = Path(config_path)
+            return chemin if chemin.exists() else None
+        for path in (
+            Path(__file__).parent.parent.parent.parent / "toolkit_eperformance" / "config_ia.json",
+            Path("/home/ballo/OX6A/toolkit_eperformance/config_ia.json"),
+            Path(__file__).parent / "config_ia.json",
+        ):
+            if path.exists():
+                return path
+        return None
     
     async def chat_completion(
         self,
