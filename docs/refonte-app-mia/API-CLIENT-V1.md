@@ -1,8 +1,12 @@
 # API CLIENT V1 — Contrat de l'app Mia (backend)
 
-**Date** : 2026-09-19 · **Chantiers** : B1 (provisionnement) · B2 (rôles scopés + 2FA + audit) · B3 (API client) · B4 (déclencheurs de notification)
+**Date** : 2026-09-19 · **Chantiers** : B1 (provisionnement) · B2 (rôles scopés + 2FA + audit) · B3 (API client) · B4 (déclencheurs de notification) · **Fondations d'extensibilité** (feature flags, plans, abonnement Jeko, tracking, WhatsApp/RCS pré-implémentés inactifs — cf. `EXTENSIBILITE.md`)
 **Base URL production (vérifiée le 19/09)** : `https://web-production-4ab53.up.railway.app` · **Préfixe client** : `/api/client/v1` (versionnement : toute rupture ira en v2)
 **Destinataire de ce document** : l'agent SITE — ce sont les DONNÉES des écrans de l'app Mia.
+
+> **⚠️ CORRIGÉ LE 19/09 (signalement SITE, révisé par mesure)** : une première version annonçait « 20 endpoints client (+ 3 routes admin) » en comptant ensemble les routes client, les routes admin et plusieurs méthodes par chemin. **Le compte réel vérifié par lecture du code : `20` routes dans `backend/api/routes/client.py`** + `3` routes admin (`POST/GET /api/chatbot/admin/clients`, `GET /api/chatbot/admin/audit`). La vérification croisée doc ↔ code ne montre **aucun chemin fantôme** (tout chemin annoncé existe) — le défaut était le compte, pas des routes inventées. **En cas de divergence, le code fait foi** : une entrée au journal le signale.
+>
+> **MISE À JOUR 19/09 (fondations d'extensibilité)** : `client.py` porte désormais **26 routes** (les 20 d'origine + `/plans`, `/subscribe`, `POST /analytics/event`, `GET /analytics/app`, `GET .../analytics/export`), plus le routeur `webhooks.py` (`POST /api/webhooks/jeko`, `GET|POST /api/webhooks/whatsapp`). Sections 15 à 18.
 
 ---
 
@@ -83,11 +87,18 @@ Auth : Bearer (accessible pendant le changement forcé). Réponse 200 :
   "must_change_password": false,
   "sites": [{"site_id": "…", "site_name": "…", "site_url": "…",
               "secteur": "restauration", "is_active": true}],
-  "tfa": {"active": true, "requise": true}
+  "tfa": {"active": true, "requise": true},
+  "plan": "free",
+  "fonctionnalites_actives": ["notifications_push", "analytics_export", "ia_en_direct"],
+  "fonctionnalites_verrouillees": [
+    {"cle": "whatsapp_notifications", "plan_requis": "premium", "raison": "fonctionnalité inactive"}
+  ]
 }
 ```
 
 `tfa.requise` vaut vrai pour `client_admin` — l'app affiche l'écran de configuration tant que `tfa.active` est faux.
+
+**Fonctionnalités (fondations d'extensibilité)** : `plan` vaut `free` (défaut), `premium` ou `pro`. `fonctionnalites_actives` liste les clés que le compte peut utiliser ; `fonctionnalites_verrouillees` les autres, chacune avec son `plan_requis` et sa `raison` (`fonctionnalité inactive` ou `plan X requis`). L'app découvre TOUTE nouvelle fonctionnalité par cette seule réponse — recette d'extension dans `EXTENSIBILITE.md §1`.
 
 ### 3.2 `POST /api/client/v1/password`
 
@@ -348,9 +359,9 @@ Suppression définitive : conversation + messages + leads (cascade). 200 : `{"ok
 | HTTP | Signification |
 |---|---|
 | 401 | jeton absent/invalide/expiré — ou login sans code 2FA (`2fa_requise`) |
-| 403 | rôle insuffisant, compte non provisioné, `must_change_password` actif, 2FA manquante pour `client_admin`, compte désactivé |
+| 403 | rôle insuffisant, compte non provisioné, `must_change_password` actif, 2FA manquante pour `client_admin`, compte désactivé, **fonctionnalité verrouillée** (corps plat : `detail` + `fonctionnalite` + `plan_requis` + `plan_actuel` + `raison` — §15) |
 | 404 | ressource inexistante **ou appartenant à un autre site** (isolation — indiscernables volontairement) |
-| 422 | validation (bornes, types, types de notification inconnus) |
+| 422 | validation (bornes, types, types de notification ou de tracking inconnus) |
 | 429 | rate limit (voir §11) |
 | 503 | dépendance de sécurité indisponible (chiffrement du secret 2FA) |
 
@@ -366,6 +377,10 @@ Par chemin + IP, phare partagé par instance :
 | `/api/client/v1/password` | 5 / 300 s |
 | `/api/client/v1/2fa/setup`, `/activate` | 10 / 300 s |
 | `/api/client/v1/2fa/disable` | 5 / 300 s |
+| `/api/client/v1/subscribe` | 5 / 300 s (déclenche un appel fournisseur) |
+| `/api/client/v1/analytics/event` | 30 / 60 s (batch au retour du réseau) |
+| `/api/webhooks/jeko` | 30 / 60 s |
+| `/api/webhooks/whatsapp` | 60 / 60 s |
 | `/api/chatbot/message` | 12 / 60 s |
 
 429 : `{"detail": "Trop de requêtes. Réessayez dans un instant."}` — l'app doit proposer une relance temporisée.
@@ -374,14 +389,15 @@ Par chemin + IP, phare partagé par instance :
 
 ## 12. Schéma de données (migration)
 
-**Tables nouvelles** (créées par `create_all`) : `audit_log`, `client_notifications`.
+**Tables nouvelles** (créées par `create_all`) : `audit_log`, `client_notifications` (B1-B4) ; `fonctionnalites`, `abonnements`, `app_analytics` (fondations d'extensibilité).
 
 **Colonnes ajoutées à des tables EXISTANTES** — le piège du projet : `init_db()` fait `create_all` au boot, qui crée les tables absentes mais **ne modifie jamais une table existante**. La migration est donc appliquée AU BOOT par `backend/core/migrations_boot.py` (inspecteur SQLAlchemy + `ALTER TABLE`, idempotent, journalisé) :
 
 - `users` : `nom`, `site_id`, `role_client`, `must_change_password`, `totp_secret`, `totp_enabled` (+ index `idx_users_site_id`, `idx_users_role_client`) ;
-- `chatbot_sites` : `sector`, `horaires` (JSON), `notification_settings` (JSON).
+- `chatbot_sites` : `sector`, `horaires` (JSON), `notification_settings` (JSON) ;
+- `users` : **`plan`** (VARCHAR(20) DEFAULT 'free', + index `idx_users_plan` — fondations, Mission 1).
 
-Le même travail existe en SQL manuel : `migrations/postgresql/005_refonte_app_mia.sql` (contrat `IMPORT_MIGRATIONS_RAILWAY.sh`). Le `sector` d'un site se renseigne via la route admin existante `POST /api/chatbot/sites/{site_id}/configure`.
+Le même travail existe en SQL manuel : `migrations/postgresql/005_refonte_app_mia.sql` puis `006_fondations_extensibilite.sql` (contrat `IMPORT_MIGRATIONS_RAILWAY.sh`). Le `sector` d'un site se renseigne via la route admin existante `POST /api/chatbot/sites/{site_id}/configure`. La seed des flags (`fonctionnalites`) est jouée au boot par `backend/core/fonctionnalites.py::seed_fonctionnalites` — idempotente, elle n'écrase JAMAIS une ligne existante.
 
 ---
 
@@ -395,3 +411,132 @@ Le même travail existe en SQL manuel : `migrations/postgresql/005_refonte_app_m
 
 - `backend/api/test_refonte_app_mia.py` — B1-B3 : flux complet provisionnement → connexion → changement forcé → **2FA** → accès aux données ; **isolation multi-tenant explicite** (site A demande site B → 404, y compris en RGPD) ; hiérarchie des rôles ; refus du `system_prompt` ; `/orders` état explicite ; rate limiting 429 ; migration au boot idempotente.
 - `backend/chatbot/test_refonte_declencheurs.py` — B4 : les trois événements, réglages par type (défauts sensibles), les **trois états de canal** (envoyé / échec / non configuré), mode arrière-plan non bloquant, aucun nom d'agent dans les notifications.
+- `backend/api/test_fondations_extensibilite.py` — fondations d'extensibilité (47 tests) : seed idempotente, `/me` enrichi, catalogue de démonstration, verrou 403 explicite end-to-end, `/subscribe` sans clés, webhook Jeko signé, tracking (batch, dédup, agrégats scopés), WhatsApp/RCS inactifs sans appel réseau, webhook WhatsApp (hub.challenge + statuts signés), migration `users.plan`.
+
+---
+
+## 15. Plans et fonctionnalités (fondations d'extensibilité)
+
+### 15.1 `GET /api/client/v1/plans`
+
+Auth : Bearer (accessible pendant le changement forcé). **200** — catalogue de démonstration explicite tant que la tarification n'est pas décidée :
+
+```json
+{
+  "catalogue": "démonstration",
+  "note": "Catalogue de démonstration : la tarification et le modèle d'abonnement ne sont pas décidés…",
+  "plans": [
+    {"plan": "free", "niveau": 1,
+     "fonctionnalites": [{"cle": "notifications_push", "etat": "actif", "description": "…"}]},
+    {"plan": "premium", "niveau": 2, "fonctionnalites": […]},
+    {"plan": "pro", "niveau": 3, "fonctionnalites": […]}
+  ]
+}
+```
+
+Chaque plan liste les fonctionnalités qu'il couvre avec leur état RÉEL (`actif`/`inactif`) — rien n'est vendu tant que ce n'est pas branché (C2).
+
+### 15.2 Le verrou `exiger_fonctionnalite` (référence backend)
+
+Une route marquée répond **403 avec corps PLAT** :
+
+```json
+{"detail": "fonctionnalité verrouillée", "fonctionnalite": "…",
+ "plan_requis": "premium", "plan_actuel": "free", "raison": "…"}
+```
+
+L'ISOLATION PASSE D'AVANT LE VERROU : un compte qui demande un site étranger reçoit 404, jamais la raison du verrou. Recette d'extension : `EXTENSIBILITE.md §1`.
+
+### 15.3 `GET /api/client/v1/sites/{site_id}/analytics/export`
+
+Auth : Bearer + `require_site_owner` + **verrou `analytics_export`** (plan `free`, actif — exemple end-to-end du verrou). Query `period_days` (1-365). 200 :
+
+```json
+{"export": true, "format": "json", "fonctionnalite": "analytics_export",
+ "genere_le": "ISO", "donnees": {…les analytics du site, même forme que §4.5…}}
+```
+
+---
+
+## 16. Abonnement Jeko (pré-implémenté, fournisseur non configuré)
+
+### 16.1 `POST /api/client/v1/subscribe`
+
+Auth : Bearer. Corps : `{"plan": "premium|pro"}` (`free` ne se souscrit pas → 400 ; plan inconnu → 400 ; plan déjà actif → 400).
+
+**Sans clés `JEKO_API_URL` / `JEKO_API_KEY` (état actuel) — 200, dégradation propre** :
+
+```json
+{"statut": "non_configure",
+ "raison": "fournisseur d'abonnement Jeko non configuré (JEKO_API_URL / JEKO_API_KEY absents)…",
+ "abonnement_id": 7, "plan": "premium"}
+```
+
+L'intention est ENREGISTRÉE en table `abonnements` (statut `intention`) : rien n'est perdu, aucune promesse n'est faite.
+
+**Avec clés (sandbox)** : appel REST `POST {JEKO_API_URL}/subscriptions` → 200 `{"statut": "en_attente_paiement", "abonnement_id": …, "reference_fournisseur": "…", "plan": …}`. Fournisseur injoignable ou en erreur → **502 explicite**, intention enregistrée (statut `echec_fournisseur`). Rate limit 5/300 s. Tracé en audit.
+
+### 16.2 `POST /api/webhooks/jeko` (public, signature OBLIGATOIRE)
+
+Contrat : en-tête `X-Jeko-Signature: sha256=<hmac-sha256 hex du corps brut avec JEKO_WEBHOOK_SECRET>`, corps `{"reference": "…", "statut": "en_attente|actif|annule|echec"}`.
+
+| Cas | Réponse |
+|---|---|
+| `JEKO_WEBHOOK_SECRET` absent | **400** — un webhook non signé n'est jamais accepté |
+| signature absente/invalid | **400** `{"detail": "signature webhook invalide"}` |
+| corps non JSON | 400 |
+| `reference`/`statut` manquants | 422 |
+| statut inconnu | 422 |
+| référence inconnue | 200 `{"ok": false, "raison": …}` + trace d'audit (pas de tempête de relances) |
+| `statut: "actif"` | 200 — abonnement passe `actif` ET **`user.plan` est élevé** (seul endroit où un plan s'active) |
+
+`statut: "annule"` met la ligne à jour SANS toucher au plan : la politique de churn n'est pas décidée (`EXTENSIBILITE.md §5`). Toute transition est tracée en audit (`webhook_jeko`).
+
+---
+
+## 17. Tracking applicatif (usage de l'APP — jamais les conversations visiteurs)
+
+### 17.1 `POST /api/client/v1/analytics/event` — batch, public OU authentifié
+
+Corps : `{"installation_id": "…", "evenements": [1 à 500 × {"event_id", "type", "date_evenement", "site_id"?, "metadata"?}]}`.
+
+- `event_id` : **UUID produit par l'app** — clé de déduplication : un rejeu (retour du réseau hors ligne) est ignoré silencieusement ;
+- `type` : `install | app_open | session_start | session_end | screen_view | feature_use | notification_open | upgrade_intent | consent` (type inconnu → 422 en nommant la liste ; extensible côté backend uniquement) ;
+- `date_evenement` : horodatage **CLIENT** (local-first) ; la date de réception serveur est posée par la base ;
+- `metadata` : objet JSON borné à **4 Ko** — AUCUNE donnée personnelle du visiteur final (c'est l'usage de l'app) ;
+- avant connexion, `installation_id` suffit (aucun jeton) ; avec un jeton valide, `user_id` et `site_id` sont remplis depuis le compte.
+
+200 : `{"ok": true, "recus": 3, "acceptes": 2, "doublons_ignores": 1}`. Rate limit 30/60 s.
+
+### 17.2 `GET /api/client/v1/analytics/app` — agrégats du propriétaire, SCOPÉS à son site
+
+Query : `period_days` (1-365, défaut 30). Un compte client ne peut PAS demander un autre site (→ 404, isolation) ; l'admin ePerformance DOIT passer `?site_id=…` (400 sinon).
+
+```json
+{
+  "site_id": "…", "periode": {"jours": 30, "depuis_reception": "ISO"},
+  "installations": {"total": 12, "par_jour": [{"date": "2026-09-19", "total": 2}]},
+  "taux_ouverture": 0.83,
+  "sessions_moyennes_par_installation": 3.4,
+  "ecrans_plus_vus": [{"ecran": "accueil", "total": 120}],
+  "derniere_activite": "ISO",
+  "evenements_par_type": {"app_open": 40, "install": 12, …}
+}
+```
+
+Définitions : installations = `installation_id` distincts vus dans la période (borne par la date de réception serveur) ; taux d'ouverture = installations ayant émis `app_open` / installations ; par jour = `install` groupés par la date CLIENT (local-first) ; écrans = `screen_view` agrégés par `metadata.ecran`.
+
+---
+
+## 18. Canaux WhatsApp et RCS (pré-implémentés, INACTIFS par défaut)
+
+Aucun envoi ne part tant que les flags ne sont pas posés — **aucun changement de code à l'activation** (`EXTENSIBILITE.md §2`) :
+
+| Canal | État tant que non activé | Activation |
+|---|---|---|
+| `whatsapp` | `etat_canal` → `non configuré : canal DÉSACTIVÉ — WHATSAPP_ENABLED n'est pas à true…` ; tout envoi → `non_configure`, **sans appel réseau** | clés Meta + `WHATSAPP_ENABLED=true` |
+| `rcs` | idem avec `RCS_ENABLED` (structure texte + cartes riches déclarative, fallback SMS déclaratif) | accès fournisseur + `RCS_ENABLED=true` |
+
+Webhooks WhatsApp (`/api/webhooks/whatsapp`) : `GET` = vérification Meta (`hub.challenge`, jeton `WHATSAPP_WEBHOOK_VERIFY_TOKEN`) ; `POST` = statuts `sent/delivered/read/failed`, signature `X-Hub-Signature-256` validée si `WHATSAPP_APP_SECRET` est posé (403 sinon), chaque statut tracé dans `chatbot_notification_logs` (sujet `statut_fournisseur: …`).
+
+Où poser les clés : Railway → Variables (production) ou `.env` Docker (déjà déclaré à vide). Liste complète des variables nouvelles : `EXTENSIBILITE.md §6`.
