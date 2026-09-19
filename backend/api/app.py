@@ -32,6 +32,7 @@ DEFAULT_ORIGINS = [
     "https://eperformance.pro",
     "https://www.eperformance.pro",
     "https://api.eperformance.pro",
+    "https://mia.eperformance.pro",
 ]
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", ",".join(DEFAULT_ORIGINS)).split(",")
 
@@ -78,6 +79,17 @@ _RATE_LIMITS = {
     "/api/client/v1/2fa/setup": (10, 300),
     "/api/client/v1/2fa/activate": (10, 300),
     "/api/client/v1/2fa/disable": (5, 300),
+    # Fondations d'extensibilité : la souscription déclenche un appel au
+    # fournisseur (coût réel) — bornée comme une route de créance.
+    "/api/client/v1/subscribe": (5, 300),
+    # Tracking applicatif : batch au retour du réseau (une app sainement
+    # configurée envoie un batch par session, pas par frappe) — la limite
+    # borne l'insertion en masse sans gêner l'usage réel.
+    "/api/client/v1/analytics/event": (30, 60),
+    # Webhooks PUBLICS : la limite borne le balayage ; les fournisseurs
+    # légitimes (Jeko, Meta) ne rejouent pas à ce rythme.
+    "/api/webhooks/jeko": (30, 60),
+    "/api/webhooks/whatsapp": (60, 60),
 }
 _rate_bucket: dict = defaultdict(deque)
 
@@ -226,6 +238,7 @@ async def shutdown_event():
 from backend.api.routes import auth, diagnostic, subscriptions_legacy, products_legacy, chatbot
 from backend.api.routes import admin_chatbot
 from backend.api.routes import client as client_routes
+from backend.api.routes import webhooks as webhooks_routes
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(diagnostic.router, prefix="/api", tags=["Diagnostic & Candidats"])
@@ -237,6 +250,35 @@ app.include_router(chatbot.router, tags=["Chatbot IA"])  # Prefix already in rou
 app.include_router(admin_chatbot.router, tags=["Chatbot IA"])  # Prefix already in router (/api/chatbot/admin)
 # Refonte app Mia (B1-B4) : API client v1, scopée par site (require_site_owner).
 app.include_router(client_routes.router, tags=["Client v1 (app Mia)"])  # Prefix /api/client/v1
+# Fondations d'extensibilité : webhooks fournisseurs (Jeko signé, statuts
+# WhatsApp) — publics, avec signature obligatoire/validée (cf. routes/webhooks.py).
+app.include_router(webhooks_routes.router, tags=["Webhooks fournisseurs"])  # Prefix /api/webhooks
+
+
+# ============================================================
+# Verrou par fonctionnalité — 403 EXPLICITE (fondations, Mission 1)
+# ============================================================
+from fastapi.requests import Request as _Request  # noqa: E402
+
+from backend.core.fonctionnalites import FonctionnaliteVerrouillee  # noqa: E402
+
+
+@app.exception_handler(FonctionnaliteVerrouillee)
+async def fonctionnalite_verrouillee_handler(
+    request: _Request, exc: FonctionnaliteVerrouillee
+):
+    """Corps PLAT du 403, contrat de l'app : l'écran d'upgrade lit
+    plan_requis sans parser un texte. Jamais d'erreur silencieuse."""
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": "fonctionnalité verrouillée",
+            "fonctionnalite": exc.cle,
+            "plan_requis": exc.plan_requis,
+            "plan_actuel": exc.plan_actuel,
+            "raison": exc.raison,
+        },
+    )
 
 
 # ============================================================
@@ -261,6 +303,19 @@ try:
         print(f"[startup] migration colonnes : {rapport}")
     else:
         print("[startup] migration colonnes : rien à faire (schéma à jour)")
+
+    # Seed IDEMPOTENTE du catalogue des fonctionnalités (fondations,
+    # Mission 1) : crée les flags manquants, n'écrase JAMAIS une ligne
+    # existante — les activations décidées par ePerformance survivent aux
+    # redéploiements. Non bloquant : un échec de seed est affiché, l'app
+    # démarre (les routes verrouillées répondront un refus explicite).
+    from backend.core.fonctionnalites import seed_fonctionnalites
+
+    try:
+        rapport_seed = seed_fonctionnalites()
+        print(f"[startup] seed fonctionnalités : {rapport_seed}")
+    except Exception as _seed_error:
+        print(f"[startup] seed fonctionnalités ÉCHEC (non bloquant): {_seed_error}")
 except Exception as _db_init_error:  # l'app doit démarrer même si la DB tarde
     print(f"[startup] init_db ÉCHEC (non bloquant): {_db_init_error}")
 
