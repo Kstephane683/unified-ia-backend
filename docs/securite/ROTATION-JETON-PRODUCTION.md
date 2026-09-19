@@ -127,3 +127,69 @@ Cinq fichiers non publiés portent ces constantes **en clair** : `Eperformance/.
 ## 9. Bilan du nettoyage
 
 **42 occurrences** de l'ancienne valeur subsistent dans les dépôts **non publiés** (toolkit, agent-ia-web), et **8 replis codés en dur**. Ce n'est plus une fuite — la valeur est morte et ces dépôts n'ont pas de remote — c'est du nettoyage. Mais tant que les replis sont là, les outils enverront une valeur morte **sans le dire**.
+
+---
+
+## 10. Correction de n8n — faite et prouvée (19/09, fin de journée)
+
+### Pourquoi le premier essai échouait (HTTP 400)
+
+Trois causes distinctes, chacune diagnostiquée par le corps de la réponse — le
+log d'erreur ajouté au script a fait la différence :
+
+1. **`request/body/active is read-only`** : l'API n8n refuse le champ `active`
+   dans le PUT. Dans cette version, l'état actif se pilote par des **endpoints
+   dédiés** (`POST /workflows/{id}/activate` et `/deactivate`). Le payload a
+   été réduit aux champs réellement modifiables (`name`, `nodes`,
+   `connections`, `settings`).
+2. **`Cannot update an archived workflow`** : deux des six workflows sont
+   **archivés** dans n8n (`isArchived: true`) et refusent toute écriture. Ce
+   sont des reliques volontairement abandonnées : elles portent encore
+   l'ancien jeton, mais elles ne tourneront plus sans une décision
+   d' désarchivage.
+3. Un workflow qui échoue n'arrête plus les autres : le script journalise
+   l'erreur complète et continue.
+
+### Résultat
+
+| Workflow | État | Jeton ancien | Jeton nouveau |
+|---|---|---|---|
+| **Meta Webhook — Réponses & Statuts** | **ACTIF** | 0 | **1** |
+| WhatsApp Séquence J+3 | inactif | 0 | 3 |
+| WhatsApp Séquence J+7 | inactif | 0 | 3 |
+| WhatsApp Sequences J0-J3-J7 | inactif | 0 | 3 |
+| WhatsApp Sequences J0-J3-J7 (2ᵉ version) | **archivé** | 5 | 0 |
+| prospect-manuel | **archivé** | 2 | 0 |
+
+**16 emplacements corrigés, réellement, par l'API officielle.** Les 2
+restants sont dans des workflows archivés — inoffensifs tant qu'ils ne sont
+pas désarchivés, et à corriger le jour où on le fait.
+
+### Preuve que le workflow actif fonctionne
+
+Test réel de la vérification Meta (exigence de l'API Meta : le `hub.challenge`
+doit être répercuté) :
+
+```
+GET /webhook/meta-whatsapp?hub.mode=subscribe&hub.verify_token=<valeur attendue>&hub.challenge=essai-4251
+→ HTTP 200, corps : essai-4251
+```
+
+**Le workflow actif répond, vérifie son jeton et renvoie le challenge** : la
+chaîne Meta → n8n → webhook_reponse.php est de nouveau opérationnelle.
+
+**Découverte au passage** : le jeton de vérification attendu par n8n n'est pas
+`ep_perf_verify_2026` (celui du PHP) mais une valeur distincte de 64
+caractères hexadécimaux, codée dans la condition du nœud « Token valide ? ».
+Il existe donc **deux** jetons de vérification en parallèle (PHP et n8n), et
+Meta n'en envoie qu'un : **seule l'URL configurée chez Meta importe**. Le
+chemin n8n étant `/webhook/meta-whatsapp` en production, c'est n8n qui reçoit
+la vérification — et il la valide avec sa propre valeur.
+
+### Ce qui reste
+
+- **2 nœuds archivés** portent l'ancien jeton — inoffensifs, à corriger si un
+  jour on désarchive.
+- **L'outillage du toolkit** (8 replis codés en dur) et **agent-ia-web** :
+  demandes déposées aux agents concernés.
+- **`MOBILE_API_TOKEN`** : mesurer le trafic avant de tourner (méthode au §8).
