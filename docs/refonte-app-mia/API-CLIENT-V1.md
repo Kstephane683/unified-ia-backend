@@ -1,7 +1,7 @@
 # API CLIENT V1 — Contrat de l'app Mia (backend)
 
 **Date** : 2026-09-19 · **Chantiers** : B1 (provisionnement) · B2 (rôles scopés + 2FA + audit) · B3 (API client) · B4 (déclencheurs de notification)
-**Base URL production** : `https://api.eperformance.pro` · **Préfixe client** : `/api/client/v1` (versionnement : toute rupture ira en v2)
+**Base URL production (vérifiée le 19/09)** : `https://web-production-4ab53.up.railway.app` · **Préfixe client** : `/api/client/v1` (versionnement : toute rupture ira en v2)
 **Destinataire de ce document** : l'agent SITE — ce sont les DONNÉES des écrans de l'app Mia.
 
 ---
