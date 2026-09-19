@@ -71,6 +71,13 @@ _RATE_LIMITS = {
     # Désabonnement : même logique, et la route n'écrit que si l'endpoint exact
     # est connu — le seul effet d'un balayage est une lecture sans résultat.
     "/api/chatbot/push/unsubscribe": (30, 60),
+    # App Mia (refonte, B1/B2) : routes de CREANCE du compte client. Le
+    # changement de mot de passe et la bascule 2FA sont exactement les cibles
+    # d'une attaque par force brute sur un compte provisioné — bornées.
+    "/api/client/v1/password": (5, 300),
+    "/api/client/v1/2fa/setup": (10, 300),
+    "/api/client/v1/2fa/activate": (10, 300),
+    "/api/client/v1/2fa/disable": (5, 300),
 }
 _rate_bucket: dict = defaultdict(deque)
 
@@ -218,6 +225,7 @@ async def shutdown_event():
 
 from backend.api.routes import auth, diagnostic, subscriptions_legacy, products_legacy, chatbot
 from backend.api.routes import admin_chatbot
+from backend.api.routes import client as client_routes
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(diagnostic.router, prefix="/api", tags=["Diagnostic & Candidats"])
@@ -227,6 +235,8 @@ app.include_router(products_legacy.router, tags=["Products"])  # Prefix already 
 # Phase 1-S1.4 : Chatbot IA (Deep Chat + 29 agents)
 app.include_router(chatbot.router, tags=["Chatbot IA"])  # Prefix already in router (/api/chatbot)
 app.include_router(admin_chatbot.router, tags=["Chatbot IA"])  # Prefix already in router (/api/chatbot/admin)
+# Refonte app Mia (B1-B4) : API client v1, scopée par site (require_site_owner).
+app.include_router(client_routes.router, tags=["Client v1 (app Mia)"])  # Prefix /api/client/v1
 
 
 # ============================================================
@@ -240,6 +250,17 @@ try:
 
     init_db()
     print("[startup] init_db OK — tables vérifiées/créées")
+    # Migration idempotente des COLONNES ajoutées par la refonte app Mia :
+    # create_all ne modifie JAMAIS une table existante (piège du projet) —
+    # les nouvelles colonnes de users et chatbot_sites exigent un
+    # ALTER TABLE explicite, cf. backend/core/migrations_boot.py.
+    from backend.core.migrations_boot import appliquer_migrations
+
+    rapport = appliquer_migrations()
+    if rapport["colonnes_ajoutees"] or rapport["index_crees"]:
+        print(f"[startup] migration colonnes : {rapport}")
+    else:
+        print("[startup] migration colonnes : rien à faire (schéma à jour)")
 except Exception as _db_init_error:  # l'app doit démarrer même si la DB tarde
     print(f"[startup] init_db ÉCHEC (non bloquant): {_db_init_error}")
 

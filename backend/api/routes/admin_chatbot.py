@@ -17,13 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm.attributes import flag_modified
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from backend.core.auth import get_current_user
+from backend.core.auth import get_current_user, get_password_hash
 from backend.core.database import get_db
 from backend.core.models import User
 from backend.chatbot.models import (
@@ -32,9 +32,11 @@ from backend.chatbot.models import (
     ChatbotMessage,
     ChatbotNotificationLog,
     ChatbotPushSubscription,
+    ChatbotSite,
     PushSubscription,
 )
 from backend.chatbot import notifications, push_abonnements
+from backend.chatbot import conversations_service
 
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
@@ -224,16 +226,14 @@ async def takeover_conversation(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    meta = get_metadata(conversation)
-    meta["human_active"] = True
-    meta["taken_over_at"] = datetime.utcnow().isoformat()
-    # Tâche 5.3 : nom réel du conseiller (affiché au visiteur, pas "Conseiller")
-    meta["taken_over_by"] = current_user.get("email") or current_user.get("sub") or "L'équipe ePerformance"
-    meta["counselor_name"] = current_user.get("nom") or meta.get("counselor_name") or "Conseiller ePerformance"
-    set_metadata(conversation, meta)
-    conversation.status = "escalated"
-    db.commit()
-    db.refresh(conversation)
+    # Logique factorisée avec l'API client v1 (B3) — voir
+    # backend/chatbot/conversations_service.py.
+    conversations_service.prendre_la_main(
+        db,
+        conversation,
+        email_conseiller=current_user.get("email"),
+        nom_conseiller=current_user.get("nom"),
+    )
 
     # Debug persistance: la metadata relue depuis la DB juste après commit.
     # Si human_active=False ici → le flush n'écrit pas la colonne JSON
@@ -264,11 +264,8 @@ async def release_conversation(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    meta = get_metadata(conversation)
-    meta["human_active"] = False
-    set_metadata(conversation, meta)
-    conversation.status = "active"
-    db.commit()
+    # Logique factorisée avec l'API client v1 (B3).
+    conversations_service.rendre_la_main(db, conversation)
 
     return TakeoverResponse(conversation_id=conversation_id, status="active", human_active=False)
 
@@ -295,18 +292,13 @@ async def send_human_message(
     if not content:
         raise HTTPException(status_code=400, detail="Empty message")
 
-    counselor = (conversation.conversation_metadata or {}).get("counselor_name") \
-        or current_user.get("nom") or "Conseiller ePerformance"
-    message = ChatbotMessage(
-        conversation_id=conversation_id,
-        role="assistant",  # enum DB: user/assistant/system — humain marqué via context_data
-        content=content,
-        agent_used=None,
-        context_data={"human": True, "human_name": counselor},
+    # Logique factorisée avec l'API client v1 (B3).
+    message = conversations_service.message_humain(
+        db,
+        conversation,
+        content,
+        nom_conseiller=current_user.get("nom"),
     )
-    db.add(message)
-    conversation.last_message_at = datetime.utcnow()
-    db.commit()
 
     return {
         "ok": True,
@@ -488,6 +480,227 @@ async def admin_stats(
         "candidats_en_attente": count(Candidat, Candidat.statut == "en_attente"),
         "users": count(User),
     }
+
+
+# ============================================================
+# PROVISIONNEMENT DES COMPTES PROPRIÉTAIRES — refonte app Mia (B1)
+# ============================================================
+#
+# Le flux de livraison : ePerformance crée le compte du propriétaire à la mise
+# en ligne de son site. Le mot de passe TEMPORAIRE est généré par le backend
+# (secrets.token_urlsafe) et renvoyé UNE SEULE FOIS dans la réponse — c'est lui
+# qui alimente le fichier de livraison du client. Il n'est ni journalisé, ni
+# audité, ni réaffichable : la seule suite possible est « mot de passe perdu →
+# réinitialisation ». Le compte naît avec must_change_password=True : tant que
+# le propriétaire n'a pas changé son mot de passe, toutes les routes client
+# refusent (403) — voir backend/core/auth.py.
+
+import secrets as _secrets
+import string as _string
+
+from pydantic import BaseModel, EmailStr, Field
+
+from backend.core.auth import (
+    HIERARCHIE_CLIENT,
+    ROLE_CLIENT_ADMIN,
+    ROLE_CLIENT_OPERATOR,
+    ROLE_CLIENT_READER,
+)
+from backend.core.audit import AuditLog, tracer_audit
+
+#: Alphabet du mot de passe temporaire : token_urlsafe (64 symboles) restreint
+#: à un ensemble lisible sans ambiguïté au téléphone (pas de 0/O, 1/l/I).
+_ALPHABET_MDP = _string.ascii_letters + _string.digits
+_SYMBOLES_EXCLUS = set("O0Il1")
+_LONGUEUR_MDP_TEMPORAIRE = 16
+
+
+def _mot_de_passe_temporaire() -> str:
+    """Mot de passe temporaire : 16+ caractères, symboles ambiguës écartés."""
+    while True:
+        brut = _secrets.token_urlsafe(12)
+        propre = "".join(c for c in brut if c not in _SYMBOLES_EXCLUS)
+        if len(propre) >= _LONGUEUR_MDP_TEMPORAIRE:
+            return propre
+
+
+class ProvisionnementClientRequest(BaseModel):
+    """Demande de création du compte propriétaire d'un site."""
+
+    email: EmailStr
+    nom: str = Field(..., min_length=1, max_length=200)
+    site_id: str = Field(..., min_length=1, max_length=100)
+    role_client: str = Field(
+        ROLE_CLIENT_ADMIN,
+        description="client_admin | client_operator | client_reader",
+    )
+
+
+@router.post("/admin/clients", status_code=201)
+async def provisionner_compte_client(
+    corps: ProvisionnementClientRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Crée le compte propriétaire d'un site (auth admin).
+
+    Réponse 201 avec `mot_de_passe_temporaire` — renvoyé UNE SEULE FOIS.
+    Le compte peut se connecter immédiatement, mais toutes les routes client
+    refusent tant que le mot de passe n'a pas été changé (must_change_password).
+    """
+    require_admin(current_user)
+
+    role_client = (corps.role_client or "").strip()
+    if role_client not in HIERARCHIE_CLIENT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"role_client doit être l'un de : {', '.join(HIERARCHIE_CLIENT)}",
+        )
+
+    site = db.query(ChatbotSite).filter(ChatbotSite.site_id == corps.site_id).first()
+    if site is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Site inconnu : {corps.site_id} — créez-le d'abord (sites/configure)",
+        )
+
+    existant = db.query(User).filter(User.email == corps.email).first()
+    if existant is not None:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    mot_de_passe = _mot_de_passe_temporaire()
+    utilisateur = User(
+        email=corps.email,
+        password_hash=get_password_hash(mot_de_passe),
+        # role='client' : valeur EXISTANTE de l'enum PostgreSQL — la granularité
+        # vit dans role_client (voir models.User pour la décision documentée).
+        role="client",
+        role_client=role_client,
+        site_id=corps.site_id,
+        nom=corps.nom,
+        must_change_password=True,
+        is_active=True,
+        created_at=datetime.now(),
+    )
+    db.add(utilisateur)
+    db.commit()
+    db.refresh(utilisateur)
+
+    # Trace d'audit — SANS le mot de passe, jamais.
+    tracer_audit(
+        db,
+        "creation_compte_client",
+        user_id=utilisateur.id,
+        user_email=utilisateur.email,
+        site_id=corps.site_id,
+        details={
+            "role_client": role_client,
+            "nom": corps.nom,
+            "cree_par": current_user.get("email"),
+        },
+        ip=_ip_appelant(request),
+    )
+    db.commit()
+
+    return {
+        "user_id": utilisateur.id,
+        "email": utilisateur.email,
+        "nom": utilisateur.nom,
+        "site_id": utilisateur.site_id,
+        "role_client": utilisateur.role_client,
+        "must_change_password": True,
+        # Une seule fois. Jamais journalisé, jamais réaffiché.
+        "mot_de_passe_temporaire": mot_de_passe,
+    }
+
+
+@router.get("/admin/clients")
+async def lister_comptes_clients(
+    site_id: str | None = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Comptes propriétaires provisionés (auth admin). Aucun secret renvoyé."""
+    require_admin(current_user)
+
+    requete = db.query(User).filter(User.role_client.isnot(None))
+    if site_id:
+        requete = requete.filter(User.site_id == site_id)
+    comptes = requete.order_by(User.created_at.desc()).limit(min(limit, 500)).all()
+    return {
+        "clients": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "nom": u.nom,
+                "site_id": u.site_id,
+                "role_client": u.role_client,
+                "must_change_password": bool(u.must_change_password),
+                "totp_enabled": bool(u.totp_enabled),
+                "is_active": u.is_active,
+                "last_login": u.last_login.isoformat() if u.last_login else None,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in comptes
+        ],
+        "total": len(comptes),
+    }
+
+
+@router.get("/admin/audit")
+async def lire_journal_audit(
+    site_id: str | None = None,
+    user_id: int | None = None,
+    action: str | None = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Lecture du journal d'audit (auth admin) — B2.
+
+    Filtres facultatifs combinables : site_id, user_id, action. Les plus
+    récentes d'abord. Le journal ne contient jamais de contenu de conversation
+    ni de secret : la lecture peut donc être donnée au support sans précaution.
+    """
+    require_admin(current_user)
+
+    requete = db.query(AuditLog)
+    if site_id:
+        requete = requete.filter(AuditLog.site_id == site_id)
+    if user_id is not None:
+        requete = requete.filter(AuditLog.user_id == user_id)
+    if action:
+        requete = requete.filter(AuditLog.action == action)
+    lignes = requete.order_by(AuditLog.date.desc()).limit(min(limit, 500)).all()
+
+    return {
+        "audit": [
+            {
+                "id": ligne.id,
+                "user_id": ligne.user_id,
+                "user_email": ligne.user_email,
+                "site_id": ligne.site_id,
+                "action": ligne.action,
+                "details": ligne.details,
+                "ip": ligne.ip,
+                "date": ligne.date.isoformat() if ligne.date else None,
+            }
+            for ligne in lignes
+        ],
+        "total": len(lignes),
+    }
+
+
+def _ip_appelant(request: Request) -> str:
+    """IP de l'appelant telle qu'arrivée (derrière un proxy Railway, XFF)."""
+    transmis = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if transmis:
+        return transmis
+    return request.client.host if request.client else "inconnue"
 
 
 # ============================================================
