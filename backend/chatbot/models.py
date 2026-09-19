@@ -45,13 +45,31 @@ class ChatbotSite(Base):
                                              comment='Limite conversations par jour par IP')
     
     # Notifications
-    notification_telegram_enabled = Column(Boolean, default=True, 
+    notification_telegram_enabled = Column(Boolean, default=True,
                                           comment='Activer notifications Telegram pour leads')
-    notification_email_enabled = Column(Boolean, default=True, 
+    notification_email_enabled = Column(Boolean, default=True,
                                        comment='Activer notifications Email pour leads')
-    notification_recipients = Column(JSON, nullable=True, 
+    notification_recipients = Column(JSON, nullable=True,
                                     comment='Liste des destinataires pour ce site')
-    
+
+    # --- Refonte app Mia (B3/B4, 2026-09-19) — colonnes créées par la
+    # migration au boot (backend/core/migrations_boot.py) : create_all ne les
+    # aurait PAS ajoutées à la table existante de production.
+    sector = Column(String(50), nullable=True,
+                    comment='Secteur du site (slug du noyau eperf_core, ex. '
+                            '"restauration") — détermine les compétences de '
+                            'Mia affichées au client')
+    horaires = Column(JSON, nullable=True,
+                      comment='Horaires et disponibilités (écran 9 de l\'app '
+                              'Mia) — structure libre JSON, documentée dans '
+                              'API-CLIENT-V1.md §8')
+    notification_settings = Column(JSON, nullable=True,
+                                   comment='Réglages de notification PAR TYPE '
+                                           '(B4) : {"nouveau_lead": {"push": '
+                                           'true, "email": false, '
+                                           '"telegram": true}, "escalade": '
+                                           '{...}, "nouveau_visiteur": {...}}')
+
     # Métadonnées
     is_active = Column(Boolean, default=True, index=True, comment='Site actif')
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
@@ -367,6 +385,45 @@ class PushSubscription(Base):
         return f"<PushSubscription(id={self.id}, actif={self.actif})>"
 
 
+class ClientNotification(Base):
+    """
+    Notification in-app du propriétaire (refonte app Mia, B4).
+
+    POURQUOI CETTE TABLE ET PAS SEULEMENT LES CANAUX
+    ------------------------------------------------
+    Les canaux existants (webpush, e-mail, Telegram) dépendent de
+    configurations externes : clés VAPID absentes, IP refusée par Brevo,
+    chat_id mal renseigné. La notification in-app, elle, ne dépend d'AUCUNE
+    clé : elle est écrite EN MÊME TEMPS que l'événement métier (nouveau lead,
+    escalade, nouveau visiteur), avant même les envois — le propriétaire voit
+    toujours son événement dans l'app, même quand tous les canaux sont mal
+    configurés. C'est le filet de sécurité produit du chantier B4.
+
+    Contenu borné : titre + corps courts, rédigés par le backend. Jamais le
+    contenu intégral d'une conversation ; le corps pointe vers elle via
+    `conversation_id` (facultatif, sert au lien de l'écran Notifications).
+    """
+    __tablename__ = "client_notifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    site_id = Column(String(100), nullable=False, index=True,
+                     comment='Site destinataire (isolation multi-tenant)')
+    type = Column(String(50), nullable=False, index=True,
+                  comment='nouveau_lead | escalade | nouveau_visiteur')
+    titre = Column(String(200), nullable=False, comment='Titre court affiché')
+    corps = Column(Text, nullable=True, comment='Corps du message in-app')
+    conversation_id = Column(String(100), nullable=True, index=True,
+                             comment='Conversation liée, pour le lien in-app')
+
+    lu = Column(Boolean, default=False, nullable=False, index=True,
+                comment='Marquée lue par POST /notifications/read')
+    date_creation = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                           index=True, comment='Moment de l\'événement')
+
+    def __repr__(self):
+        return f"<ClientNotification(id={self.id}, site={self.site_id}, type={self.type})>"
+
+
 class ChatbotNotificationLog(Base):
     """
     Trace d'un envoi de notification — tâche 6.5.
@@ -427,3 +484,6 @@ Index('idx_notifications_canal_created', ChatbotNotificationLog.canal, ChatbotNo
 Index('idx_notifications_statut_created', ChatbotNotificationLog.statut, ChatbotNotificationLog.created_at)
 # L'envoi webpush ne demande qu'une chose : les abonnements ACTIFS, par site.
 Index('idx_push_subscriptions_actif_site', PushSubscription.actif, PushSubscription.site_id)
+# Boîte de réception in-app du propriétaire : les non lues d'abord.
+Index('idx_client_notifications_site_lu', ClientNotification.site_id, ClientNotification.lu)
+Index('idx_client_notifications_site_date', ClientNotification.site_id, ClientNotification.date_creation)

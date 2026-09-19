@@ -26,18 +26,55 @@ class User(Base):
     """
     Unified authentication table.
     Replaces separate auth in: admins, candidats, formation_inscrits
+
+    Refonte app Mia (chantier B1/B2, 2026-09-19) — colonnes ajoutées :
+    nom, site_id, role_client, must_change_password, totp_secret, totp_enabled.
+
+    POURQUOI LES RÔLES CLIENT NE SONT PAS DANS LA COLONNE `role`
+    ------------------------------------------------------------
+    `role` est un Enum PostgreSQL NATIF (`user_role`) créé par create_all en
+    production. Y ajouter client_admin/client_operator/client_reader exigerait
+    un ALTER TYPE ... ADD VALUE — fragile en déploiement (ordre d'exécution,
+    transaction, recréation sur base neuve) pour un bénéfice nul. La granularité
+    vit donc dans `role_client`, une colonne VARCHAR validée APPLICATIVEMENT
+    (backend.core.auth.HIERARCHIE_CLIENT), tandis que `role` garde sa sémantique
+    existante : un propriétaire de site a role='client' (compatible avec
+    tout l'existant, y compris verify_role) et role_client='client_admin' etc.
+    Voir docs/refonte-app-mia/API-CLIENT-V1.md §2.
     """
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
-    role = Column(Enum('admin', 'client', 'apprenant', 'lead', name='user_role'), 
+    role = Column(Enum('admin', 'client', 'apprenant', 'lead', name='user_role'),
                   default='lead', nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
     last_login = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
-    
+
+    # --- Refonte app Mia (B1/B2) — colonnes créées par la migration au boot
+    # (backend/core/migrations_boot.py) ; create_all ne les aurait PAS ajoutées
+    # à la table existante de production (piège connu du projet).
+    nom = Column(String(200), nullable=True, comment='Nom affiché du compte')
+    site_id = Column(String(100), nullable=True, index=True,
+                     comment='Site géré par ce compte (multi-tenant app Mia)')
+    role_client = Column(String(20), nullable=True, index=True,
+                         comment='Granularité client : client_admin | '
+                                 'client_operator | client_reader (null = '
+                                 'compte non provisioné pour l\'app Mia)')
+    must_change_password = Column(Boolean, nullable=True,
+                                  comment='Vrai après provisionnement : toutes '
+                                          'les routes client refusent tant que '
+                                          'le mot de passe temporaire n\'a pas '
+                                          'été changé')
+    totp_secret = Column(Text, nullable=True,
+                         comment='Secret TOTP chiffré (Fernet, clé dérivée de '
+                                 'SECRET_KEY) — jamais en clair, jamais renvoyé')
+    totp_enabled = Column(Boolean, nullable=True,
+                          comment='2FA TOTP active (obligatoire pour '
+                                  'client_admin)')
+
     # Relationships (candidat and formation_inscrit relationships disabled until migration adds user_id FK)
     # candidat = relationship("Candidat", back_populates="user", uselist=False)
     # formation_inscrit = relationship("FormationInscrit", back_populates="user", uselist=False)
