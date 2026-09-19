@@ -8,12 +8,12 @@ Endpoints:
 - GET /api/auth/me - Get current user details
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from backend.core.database import get_db
 from backend.core.models import User, Candidat, FormationInscrit
@@ -22,9 +22,17 @@ from backend.core.auth import (
     verify_password,
     create_access_token,
     get_current_user,
+    verifier_secret_totp,
+    ChiffrementIndisponible,
 )
 
 router = APIRouter()
+
+#: Durée d'un jeton « rappel » (remember_me) — refonte app Mia, B1.
+#: Session longue demandée par le plan (§3.3 : « session 30 jours »). Le
+#: raccourcissement futur par ré-authentification (passkey après inactivité)
+#: est une évolution côté app, pas backend.
+JETON_RAPPEL_JOURS = 30
 
 
 # ============================================================
@@ -53,6 +61,9 @@ class UserLogin(BaseModel):
     """Schema for user login."""
     email: EmailStr
     password: str
+    # Refonte app Mia (B1/B2) — facultatifs, rétrocompatibles :
+    remember_me: bool = False          # jeton « rappel » 30 jours
+    totp_code: Optional[str] = None    # code 2FA si activée sur le compte
 
 
 class Token(BaseModel):
@@ -60,6 +71,18 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int = 86400  # 24h in seconds
+
+
+class TokenConnexion(Token):
+    """
+    Réponse du login (refonte app Mia, B1).
+
+    `must_change_password` : vrai tant que le mot de passe temporaire fourni à
+    la livraison n'a pas été changé — l'app doit forcer l'écran de changement.
+    Champ ADDITIF : les consommateurs existants (widget, console) l'ignorent
+    sans aucune régression.
+    """
+    must_change_password: bool = False
 
 
 class UserResponse(BaseModel):
@@ -78,6 +101,41 @@ class UserResponse(BaseModel):
 # ============================================================
 # Routes
 # ============================================================
+
+def _verifier_2fa_si_requise(user: User, totp_code: Optional[str]) -> None:
+    """
+    Vérifie le second facteur si la 2FA est active sur le compte (B2).
+
+    · 2FA active + code absent        → 401 `2fa_requise` (raison explicite ;
+      l'app affiche alors le champ code, pas une erreur générique) ;
+    · 2FA active + code invalide      → 401 « code 2FA invalide » ;
+    · secret illisible (SECRET_KEY changée) → 403, échec FERMÉ : jamais de
+      validation par défaut quand le second facteur ne peut pas être vérifié ;
+    · bibliothèque pyotp absente      → 403, même échec fermé (état géré, pas
+      une panne de démarrage : l'import est paresseux, règle du projet).
+    """
+    if not user.totp_enabled:
+        return
+
+    import pyotp  # import paresseux volontaire (règle du projet)
+
+    if not (totp_code or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="2fa_requise",
+        )
+    try:
+        if not verifier_secret_totp(user.totp_secret, totp_code):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="code 2FA invalide",
+            )
+    except ChiffrementIndisponible as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"2FA non vérifiable côté serveur : {exc}",
+        )
+
 
 @router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)
 def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
@@ -123,31 +181,42 @@ def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=TokenConnexion)
 def login_user(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
+    remember_me: bool = Form(False),
+    totp_code: str = Form(""),
+    db: Session = Depends(get_db),
 ):
     """
     Login user with email and password.
-    
+
     Returns JWT token on success.
-    
+
     OAuth2 compatible endpoint (username = email).
-    
+
+    Refonte app Mia (B1/B2) :
+    - `remember_me` (formulaire, facultatif) → jeton « rappel » de 30 jours
+      au lieu de la durée standard (ACCESS_TOKEN_EXPIRE_MINUTES) ;
+    - si la 2FA est active sur le compte, un `totp_code` valide est exigé —
+      sans code, la réponse est 401 avec la raison `2fa_requise` ;
+    - la réponse expose `must_change_password` (changement forcé du mot de
+      passe temporaire après provisionnement).
+
     Raises:
-        HTTPException 401: If credentials are invalid
+        HTTPException 401: If credentials are invalid / code 2FA absent
+        HTTPException 403: If account disabled / 2FA invérifiable
     """
     # Find user by email (username field in OAuth2)
     user = db.query(User).filter(User.email == form_data.username).first()
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Verify password
     if not verify_password(form_data.password, user.password_hash):
         raise HTTPException(
@@ -155,76 +224,105 @@ def login_user(
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Check if account is active
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is disabled"
         )
-    
+
+    # Second facteur (2FA TOTP) si activé sur le compte
+    _verifier_2fa_si_requise(user, totp_code)
+
     # Update last login
     user.last_login = datetime.now()
     db.commit()
-    
+
+    # Jeton « rappel » : 30 jours si remember_me, sinon durée configurable
+    if remember_me:
+        duree = timedelta(days=JETON_RAPPEL_JOURS)
+        expires_in = JETON_RAPPEL_JOURS * 86400
+    else:
+        from backend.core.auth import ACCESS_TOKEN_EXPIRE_MINUTES
+        duree = None
+        expires_in = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
     # Create JWT token
     access_token = create_access_token(
-        data={"sub": user.email, "role": user.role}
+        data={"sub": user.email, "role": user.role},
+        expires_delta=duree,
     )
-    
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "expires_in": 86400,
+        "expires_in": expires_in,
+        "must_change_password": bool(user.must_change_password),
     }
 
 
-@router.post("/login/json", response_model=Token)
+@router.post("/login/json", response_model=TokenConnexion)
 def login_user_json(login_data: UserLogin, db: Session = Depends(get_db)):
     """
     Login user with JSON body (alternative to OAuth2 form).
-    
+
     Useful for frontend applications that prefer JSON.
-    
+    Mêmes évolutions B1/B2 que /login (remember_me, 2FA, must_change_password).
+
     Raises:
-        HTTPException 401: If credentials are invalid
+        HTTPException 401: If credentials are invalid / code 2FA absent
     """
     # Find user
     user = db.query(User).filter(User.email == login_data.email).first()
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
-    
+
     # Verify password
     if not verify_password(login_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
-    
+
     # Check if active
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is disabled"
         )
-    
+
+    # Second facteur (2FA TOTP) si activé sur le compte
+    _verifier_2fa_si_requise(user, login_data.totp_code)
+
     # Update last login
     user.last_login = datetime.now()
     db.commit()
-    
+
+    # Jeton « rappel » : 30 jours si remember_me, sinon durée configurable
+    if login_data.remember_me:
+        duree = timedelta(days=JETON_RAPPEL_JOURS)
+        expires_in = JETON_RAPPEL_JOURS * 86400
+    else:
+        from backend.core.auth import ACCESS_TOKEN_EXPIRE_MINUTES
+        duree = None
+        expires_in = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
     # Create token
     access_token = create_access_token(
-        data={"sub": user.email, "role": user.role}
+        data={"sub": user.email, "role": user.role},
+        expires_delta=duree,
     )
-    
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "expires_in": 86400,
+        "expires_in": expires_in,
+        "must_change_password": bool(user.must_change_password),
     }
 
 

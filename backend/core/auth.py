@@ -219,7 +219,7 @@ async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
 async def require_client(current_user: dict = Depends(get_current_user)) -> dict:
     """
     FastAPI dependency to require client or admin role.
-    
+
     Usage:
         @app.get("/my-projects")
         def my_projects(user: dict = Depends(require_client)):
@@ -231,6 +231,239 @@ async def require_client(current_user: dict = Depends(get_current_user)) -> dict
             detail="Client access required"
         )
     return current_user
+
+
+# ============================================================
+# Refonte app Mia — rôles client scopés par site (chantier B2)
+# ============================================================
+#
+# HIÉRARCHIE : admin (ePerformance, tout voir) > client_admin >
+# client_operator > client_reader. La valeur numérique sert au
+# « niveau minimal requis » d'une route : reader=1, operator=2, admin=3.
+
+ROLE_CLIENT_ADMIN = "client_admin"
+ROLE_CLIENT_OPERATOR = "client_operator"
+ROLE_CLIENT_READER = "client_reader"
+
+HIERARCHIE_CLIENT = {
+    ROLE_CLIENT_READER: 1,
+    ROLE_CLIENT_OPERATOR: 2,
+    ROLE_CLIENT_ADMIN: 3,
+}
+
+
+def verifier_secret_totp(secret_stocke: Optional[str], code: str) -> bool:
+    """
+    Vérifie un code TOTP (2FA) contre le secret chiffré en base.
+
+    `pyotp` est importé ICI, à l'intérieur de la fonction — jamais au niveau
+    du module (piège du projet : un import manquant d'une bibliothèque
+    optionnelle a déjà causé une panne de production). Le chiffrement du
+    secret repose sur `cryptography` (déjà présent via python-jose[cryptography]).
+
+    Renvoie False si le code est invalide, lève ChiffrementIndisponible si le
+    secret ne peut pas être déchiffré (clé serveur changée) — l'appelant
+    décide du code HTTP (échec fermé, jamais une validation par défaut).
+    """
+    if not secret_stocke:
+        return False
+
+    secret_clair = dechiffrer_secret_totp(secret_stocke)
+
+    import pyotp  # import paresseux volontaire (règle du projet)
+
+    # valid_window=1 : accepte le code de la fenêtre précédente ou suivante
+    # (±30 s) — la tolérance standard au décalage d'horloge du téléphone,
+    # sinon un code généré à la frontière d'une fenêtre serait refusé.
+    return pyotp.TOTP(secret_clair).verify(
+        (code or "").strip().replace(" ", ""), valid_window=1
+    )
+
+
+class ChiffrementIndisponible(Exception):
+    """Le secret TOTP ne peut pas être chiffré/déchiffré (clé serveur)."""
+
+
+def _cle_fernet() -> bytes:
+    """Clé Fernet dérivée de SECRET_KEY (sha256 → base64url).
+
+    Conséquence documentée : faire tourner SECRET_KEY invalide les secrets
+    TOTP stockés — les comptes doivent refaire la configuration 2FA. C'est
+    assumé : SECRET_KEY est censé être stable et secret.
+    """
+    import base64
+    import hashlib
+
+    return base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest())
+
+
+def chiffrer_secret_totp(secret_clair: str) -> str:
+    """
+    Chiffre un secret TOTP pour stockage (Fernet, préfixe de version).
+
+    Lève ChiffrementIndisponible si la bibliothèque manque — dans ce cas on
+    REFUSE d'activer la 2FA plutôt que de stocker le secret en clair.
+    """
+    try:
+        from cryptography.fernet import Fernet  # déjà présent (python-jose)
+    except Exception as exc:  # pragma: no cover - dépendance normalement là
+        raise ChiffrementIndisponible(
+            "bibliothèque 'cryptography' indisponible : la 2FA ne peut pas "
+            "être activée (aucun secret ne serait stocké en clair)"
+        ) from exc
+
+    return "fernet:v1:" + Fernet(_cle_fernet()).encrypt(
+        secret_clair.encode()
+    ).decode()
+
+
+def dechiffrer_secret_totp(secret_stocke: str) -> str:
+    """
+    Déchiffre un secret TOTP stocké. Lève ChiffrementIndisponible si la clé
+    serveur a changé (le secret devient illisible) ou si la bibliothèque manque.
+    """
+    if not secret_stocke.startswith("fernet:v1:"):
+        raise ChiffrementIndisponible(
+            "secret TOTP dans un format inconnu : refaire la configuration 2FA"
+        )
+    try:
+        from cryptography.fernet import Fernet, InvalidToken
+    except Exception as exc:  # pragma: no cover
+        raise ChiffrementIndisponible(
+            "bibliothèque 'cryptography' indisponible"
+        ) from exc
+
+    try:
+        return Fernet(_cle_fernet()).decrypt(
+            secret_stocke[len("fernet:v1:"):].encode()
+        ).decode()
+    except InvalidToken as exc:
+        raise ChiffrementIndisponible(
+            "secret TOTP illisible (SECRET_KEY a changé ?) : refaire la "
+            "configuration 2FA"
+        ) from exc
+
+
+# ============================================================
+# Dépendances client scopées (app Mia) — auth.py côté compte
+# ============================================================
+
+from sqlalchemy.orm import Session as _Session  # noqa: E402
+from backend.core.database import get_db  # noqa: E402
+
+
+async def compte_client_authentifie(
+    current_user: dict = Depends(get_current_user),
+    db: _Session = Depends(get_db),
+) -> "User":
+    """
+    Charge le compte EN BASE (le JWT ne porte pas l'état mutable).
+
+    Vérifie : compte existant, actif, et changement de mot de passe effectué.
+    Tant que `must_change_password` est vrai, TOUTES les routes client refusent
+    (403, raison explicite) SAUF le changement de mot de passe, qui utilise sa
+    propre dépendance.
+    """
+    from backend.core.models import User
+
+    utilisateur = db.query(User).filter(User.email == current_user["email"]).first()
+    if utilisateur is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Compte introuvable",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not utilisateur.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Compte désactivé",
+        )
+    if utilisateur.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Changement de mot de passe requis : le mot de passe "
+                "temporaire fourni à la livraison doit être changé avant tout "
+                "accès (POST /api/client/v1/password)"
+            ),
+        )
+    return utilisateur
+
+
+def require_site_owner(role_min: str = ROLE_CLIENT_READER):
+    """
+    Fabrique de dépendance B2 : scope multi-tenant par site.
+
+    Usage :
+        @router.get("/sites/{site_id}/conversations")
+        def ...(
+            site_id: str,
+            utilisateur: User = Depends(require_site_owner()),
+        ):
+    ou, pour une route en écriture :
+        Depends(require_site_owner(ROLE_CLIENT_OPERATOR))
+
+    Garanties (DANS CET ORDRE — l'ordre fait partie du contrat) :
+      · admin (ePerformance) : passe toujours ;
+      · compte client NON provisioné pour l'app Mia : 403 (parle du compte) ;
+      · ISOLATION MULTI-TENANT : un propriétaire qui demande un site qui n'est
+        PAS le sien reçoit 404 (et non 403) — 403 révélerait l'existence des
+        autres sites. Cette vérification passe AVANT la suffisance de rôle et
+        la porte 2FA : aucune réponse ne distingue « site d'un autre » et
+        « site inexistant », quel que soit le rôle de l'appelant ;
+      · rôle client insuffisant pour `role_min` : 403 ;
+      · client_admin SANS 2FA active, sur SON site : 403 (la 2FA est
+        obligatoire — audit préalable C5).
+    """
+    if role_min not in HIERARCHIE_CLIENT:
+        raise ValueError(
+            f"role_min doit être l'un de : {', '.join(HIERARCHIE_CLIENT)}"
+        )
+
+    async def dependance(
+        site_id: str,
+        utilisateur: "User" = Depends(compte_client_authentifie),
+    ) -> "User":
+        # ePerformance voit tout (rôle plateforme, pas un rôle client).
+        if utilisateur.role == "admin":
+            return utilisateur
+
+        if utilisateur.role_client not in HIERARCHIE_CLIENT:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Compte client non provisioné pour l'application Mia",
+            )
+        # ISOLATION : 404, jamais 403, pour ne pas révéler l'existence des
+        # autres sites — AVANT la suffisance de rôle et la porte 2FA (voir la
+        # doc du contrat).
+        if utilisateur.site_id != site_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Site non trouvé",
+            )
+        niveau = HIERARCHIE_CLIENT[utilisateur.role_client]
+        if niveau < HIERARCHIE_CLIENT[role_min]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Rôle insuffisant : {role_min} requis",
+            )
+        # 2FA obligatoire pour client_admin (audit préalable C5) — sauf au
+        # moment de la configurer, ce qui passe par des routes compte-level.
+        if (
+            utilisateur.role_client == ROLE_CLIENT_ADMIN
+            and not utilisateur.totp_enabled
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "2FA obligatoire pour le rôle client_admin : terminez la "
+                    "configuration (POST /api/client/v1/2fa/setup puis "
+                    "/2fa/activate)"
+                ),
+            )
+        return utilisateur
+
+    return dependance
 
 
 if __name__ == "__main__":
