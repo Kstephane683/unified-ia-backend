@@ -75,6 +75,19 @@ class User(Base):
                           comment='2FA TOTP active (obligatoire pour '
                                   'client_admin)')
 
+    # --- Fondations d'extensibilité (Mission 1) — colonne créée par la
+    # migration au boot (backend/core/migrations_boot.py) : create_all ne
+    # l'aurait PAS ajoutée à la table existante de production (piège du
+    # projet). `free` est la valeur de tout compte existant ; `premium` et
+    # `pro` EXISTENT dans le catalogue mais rien ne les active encore
+    # (l'abonnement Jeko n'est pas branché — cf. docs/refonte-app-mia/
+    # EXTENSIBILITE.md).
+    plan = Column(String(20), nullable=True, default='free',
+                  comment='Plan du compte : free | premium | pro (VARCHAR '
+                          'validé applicativement, même choix de design que '
+                          'role_client : pas d\'enum natif à faire évoluer). '
+                          'NULL = free (comptes préexistants).')
+
     # Relationships (candidat and formation_inscrit relationships disabled until migration adds user_id FK)
     # candidat = relationship("Candidat", back_populates="user", uselist=False)
     # formation_inscrit = relationship("FormationInscrit", back_populates="user", uselist=False)

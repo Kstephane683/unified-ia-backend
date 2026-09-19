@@ -474,6 +474,151 @@ class ChatbotNotificationLog(Base):
         return f"<ChatbotNotificationLog(id={self.id}, canal={self.canal}, statut={self.statut})>"
 
 
+class Fonctionnalite(Base):
+    """
+    Feature flag du produit (fondations d'extensibilité, Mission 1).
+
+    UNE LIGNE PAR FONCTIONNALITÉ, seedée au boot de façon IDEMPOTENTE
+    (backend/core/fonctionnalites.py::seed_fonctionnalites) : une ligne
+    absente est créée, une ligne présente n'est JAMAIS écrasée — l'activation
+    (`active`) et le plan requis (`plan_minimum`) sont des décisions de
+    gestion qui doivent survivre aux redéploiements.
+
+    Les canaux WhatsApp / RCS et l'abonnement Jeko sont créés INACTIFS : leur
+    route est pré-implémentée, leur activation est une décision du
+    propriétaire (poser les clés, basculer le flag — aucun changement de
+    code, cf. docs/refonte-app-mia/EXTENSIBILITE.md).
+    """
+    __tablename__ = "fonctionnalites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cle = Column(String(50), nullable=False, unique=True, index=True,
+                 comment='Clé du flag (notifications_push, rcs_messages, …) — '
+                         'identité stable, consommée par l\'app via /me')
+    plan_minimum = Column(String(20), nullable=False, default='free',
+                          comment='Plan minimum requis : free | premium | pro '
+                                  '(VARCHAR validé applicativement, comme '
+                                  'role_client)')
+    active = Column(Boolean, nullable=False, default=True,
+                    comment='Interrupteur : faux = toute route marquée '
+                            'exiger_fonctionnalite(cle) répond 403 explicite')
+    description = Column(Text, nullable=True,
+                         comment='Description lisible, renvoyée par GET /plans')
+
+    def __repr__(self):
+        return f"<Fonctionnalite(cle={self.cle}, active={self.active}, plan={self.plan_minimum})>"
+
+
+class Abonnement(Base):
+    """
+    Intention / état d'abonnement d'un compte (fournisseur Jeko, Mission 1).
+
+    POURQUOI CETTE TABLE EXISTE MÊME SANS FOURNISSEUR BRANCHÉ
+    ---------------------------------------------------------
+    POST /api/client/v1/subscribe, sans clés JEKO_*, répond un état explicite
+    `non_configure` ET enregistre l'INTENTION ici : aucune demande du
+    propriétaire n'est perdue, la souscription sera traitée dès l'activation
+    du fournisseur. Avec clés (sandbox), la ligne porte la référence du
+    fournisseur et le webhook signé POST /api/webhooks/jeko met le statut à
+    jour ; statut `actif` élève le plan du compte (user.plan).
+
+    Aucun montant : la tarification n'est pas décidée (décision du
+    propriétaire — cf. EXTENSIBILITE.md §décisions).
+    """
+    __tablename__ = "abonnements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True,
+                     comment='Compte qui demande / porte l\'abonnement')
+    plan = Column(String(20), nullable=False,
+                  comment='Plan demandé : premium | pro (free n\'est pas '
+                          'souscriptible — refus explicite)')
+    statut = Column(String(30), nullable=False, index=True,
+                    comment='intention (enregistrée sans fournisseur) | '
+                            'en_attente (fournisseur appelé, webhook attendu) '
+                            '| actif | annule | echec_fournisseur')
+    fournisseur = Column(String(30), nullable=False, default='jeko',
+                         comment='Fournisseur d\'abonnement (un seul aujourd\'hui)')
+    reference_fournisseur = Column(String(200), nullable=True, index=True,
+                                   comment='Identifiant de l\'abonnement chez le '
+                                           'fournisseur — clé de rapprochement '
+                                           'du webhook')
+    donnees = Column('metadata', JSON, nullable=True,
+                     comment='Données additionnelles du fournisseur (jamais de '
+                             'secret, jamais de moyen de paiement)')
+
+    date_creation = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                           comment='Création de l\'intention / de la souscription')
+    date_mise_a_jour = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                              onupdate=func.current_timestamp(),
+                              comment='Dernier changement de statut')
+
+    def __repr__(self):
+        return f"<Abonnement(id={self.id}, user={self.user_id}, plan={self.plan}, statut={self.statut})>"
+
+
+class AppAnalytics(Base):
+    """
+    Tracking APPLICATIF (usage de l'app Mia, Mission 2) — PAS le tracking des
+    conversations visiteurs (celui-là vit dans `chatbot_analytics`).
+
+    Ce que la table enregistre : l'usage de l'APP par ses installations —
+    installation, ouverture, sessions, écrans vus, intention d'upgrade,
+    trace de consentement. CE QU'ELLE N'ENREGISTRE PAS : aucune donnée
+    personnelle du visiteur final du site client, aucune conversation (RGPD :
+    le champ `metadata` est borné et l'app n'y met pas d'identité de visiteur).
+
+    LOCAL-FIRST : `date_evenement` est l'horodatage du CLIENT (l'événement est
+    daté au moment où il se produit, même hors ligne) ; `date_reception` est
+    l'horodatage SERVEUR (borne de confiance pour les périodes d'agrégation).
+    La déduplication repose sur `event_id` (UUID fourni par l'app, UNIQUE) :
+    rejouer un batch au retour du réseau n'écrit RIEN de plus.
+    """
+    __tablename__ = "app_analytics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    #: UUID produit PAR L'APP (client) : c'est l'identité de l'événement, la
+    #: clé de déduplication. Un rejeu exact est ignoré silencieusement (200).
+    event_id = Column(String(64), nullable=False, unique=True, index=True,
+                      comment='UUID fourni par l\'app — déduplication')
+    installation_id = Column(String(64), nullable=False, index=True,
+                             comment='Identifiant d\'installation (avant '
+                                     'connexion, sans aucune identité '
+                                     'personnelle)')
+    user_id = Column(Integer, nullable=True, index=True,
+                     comment='Compte Mia, quand l\'événement est envoyé '
+                             'authentifié (null avant connexion)')
+    site_id = Column(String(100), nullable=True, index=True,
+                     comment='Site de l\'app, renseigné par l\'app ou déduit '
+                             'du compte authentifié')
+
+    event_type = Column(String(50), nullable=False, index=True,
+                        comment='install | app_open | session_start | '
+                                'session_end | screen_view | feature_use | '
+                                'notification_open | upgrade_intent | consent '
+                                '(énumération applicative extensible — cf. '
+                                'EXTENSIBILITE.md)')
+    donnees = Column('metadata', JSON, nullable=True,
+                     comment='Métadonnées de l\'événement (écran vu, '
+                             'fonctionnalité utilisée…). Borne : 4 Ko par '
+                             'événement. AUCUNE donnée personnelle de '
+                             'visiteur final')
+
+    date_evenement = Column(TIMESTAMP, nullable=False,
+                            comment='Horodatage CLIENT (local-first : l\'event '
+                                    'est daté quand il se produit, hors ligne '
+                                    'compris)')
+    date_reception = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                            index=True,
+                            comment='Horodatage SERVEUR (borne de confiance '
+                                    'des périodes d\'agrégation)')
+
+    def __repr__(self):
+        return (f"<AppAnalytics(event_id={self.event_id}, type={self.event_type}, "
+                f"installation={self.installation_id})>")
+
+
 # Indexes composés pour optimisation des requêtes
 Index('idx_conversations_site_status', ChatbotConversation.site_id, ChatbotConversation.status)
 Index('idx_conversations_site_started', ChatbotConversation.site_id, ChatbotConversation.started_at)

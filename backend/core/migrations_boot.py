@@ -49,6 +49,10 @@ PLAN_COLONNES: Dict[str, List[Tuple[str, str]]] = {
         ("must_change_password", "BOOLEAN DEFAULT FALSE"),
         ("totp_secret", "TEXT"),
         ("totp_enabled", "BOOLEAN DEFAULT FALSE"),
+        # Fondations d'extensibilité (Mission 1) : plan du compte. Le DEFAULT
+        # 'free' valorise d'un coup les comptes préexistants ; le modèle ORM
+        # le reflète (backend/core/models.py, User.plan).
+        ("plan", "VARCHAR(20) DEFAULT 'free'"),
     ],
     "chatbot_sites": [
         ("sector", "VARCHAR(50)"),
@@ -61,6 +65,7 @@ PLAN_COLONNES: Dict[str, List[Tuple[str, str]]] = {
 PLAN_INDEX: List[Tuple[str, str, str]] = [
     ("idx_users_site_id", "users", "site_id"),
     ("idx_users_role_client", "users", "role_client"),
+    ("idx_users_plan", "users", "plan"),
 ]
 
 
