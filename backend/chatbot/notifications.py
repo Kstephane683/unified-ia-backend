@@ -59,8 +59,52 @@ DELAI_ENVOI = float(os.getenv("NOTIF_TIMEOUT", "15"))
 #: archive de contenu : elle dit CE QUI a été envoyé et SI c'est parti).
 TRACE_CORPS_MAX = int(os.getenv("NOTIF_TRACE_CORPS", "500"))
 
-#: Canaux connus. L'ordre est celui de la préférence par défaut.
-CANAUX = ("telegram", "email", "webpush", "whatsapp")
+#: Canaux connus. L'ordre est celui de la préférence par défaut. `rcs` est
+#: pré-implémenté (interface abstraite texte + cartes) mais INACTIF par
+#: défaut : sans RCS_ENABLED=true, le canal répond « désactivé » et tout
+#: envoi renvoie un état explicite — aucune exception, aucun appel réseau
+#: (fondations d'extensibilité, Missions 3-4).
+CANAUX = ("telegram", "email", "webpush", "whatsapp", "rcs")
+
+#: Templates WhatsApp structurés (Métier : notifications proactives = OBLIGE
+#: à passer par des templates pré-approuvés dans Meta Business Manager —
+#: catégorie UTILITY pour le transactionnel). L'activation du canal est
+#: portée par WHATSAPP_ENABLED ; ces templates ne servent qu'une fois le
+#: canal actif. Les noms doivent correspondre à des templates créés et
+#: approuvés côté Meta (guide : backend/communication/providers/
+#: whatsapp_provider.py — la référence d'implémentation du canal reste CE
+#: module, voir la note d'héritage dans le provider).
+TEMPLATES_WHATSAPP: Dict[str, Dict[str, str]] = {
+    "nouveau_lead": {
+        "nom": "mia_nouveau_lead",
+        "langue": "fr",
+        "categorie": "UTILITY",
+        "description": "Nouveau lead capturé par Mia sur le site du propriétaire",
+        "variables": ["nom du visiteur", "nom du site", "résumé de la demande"],
+    },
+    "escalade": {
+        "nom": "mia_escalade",
+        "langue": "fr",
+        "categorie": "UTILITY",
+        "description": "Escalade : un visiteur demande à parler à un humain",
+        "variables": ["nom du site", "nom du visiteur", "sujet"],
+    },
+}
+
+
+def template_whatsapp(type_evenement: str, variables: List[str]) -> Dict:
+    """
+    Construit le paramètre `template` de `envoyer(canal="whatsapp", …)` pour
+    un événement connu (nouveau_lead, escalade). Lève ValueError pour un type
+    inconnu — c'est un défaut d'appel, pas un état d'envoi.
+    """
+    spec = TEMPLATES_WHATSAPP.get(type_evenement)
+    if spec is None:
+        raise ValueError(
+            f"template WhatsApp inconnu : « {type_evenement} ». Connus : "
+            f"{', '.join(sorted(TEMPLATES_WHATSAPP))}"
+        )
+    return {"nom": spec["nom"], "langue": spec["langue"], "variables": list(variables or [])}
 
 
 # ============================================================
@@ -186,14 +230,76 @@ def etat_canal(canal: str) -> EtatCanal:
         )
 
     if canal == "whatsapp":
+        # FONDATIONS (Mission 3) : le canal est pré-implémenté (Meta Cloud
+        # API) mais INACTIF PAR DÉFAUT — tant que WHATSAPP_ENABLED n'est pas
+        # à `true`, l'état est « désactivé » et tout envoi renvoie cet état
+        # SANS appel réseau, même si les clés sont présentes. Poser les clés
+        # ET basculer le flag active le canal sans aucun changement de code.
+        if _variable("WHATSAPP_ENABLED").lower() != "true":
+            return EtatCanal(
+                "whatsapp",
+                False,
+                "non configuré : canal DÉSACTIVÉ — WHATSAPP_ENABLED n'est pas "
+                "à true (pré-implémenté, Meta Cloud API, inactif par défaut ; "
+                "activation : clés + flag, cf. docs/refonte-app-mia/"
+                "EXTENSIBILITE.md)",
+            )
         jeton = _variable("WHATSAPP_ACCESS_TOKEN")
         numero = _variable("WHATSAPP_PHONE_NUMBER_ID")
         if jeton and numero:
-            return EtatCanal("whatsapp", True, "configuré (jeton et numéro présents)")
+            return EtatCanal("whatsapp", True, "configuré (WHATSAPP_ENABLED=true, jeton et numéro présents)")
+        manquantes = [
+            nom
+            for nom, valeur in (
+                ("WHATSAPP_ACCESS_TOKEN", jeton),
+                ("WHATSAPP_PHONE_NUMBER_ID", numero),
+            )
+            if not valeur
+        ]
         return EtatCanal(
             "whatsapp",
             False,
-            "non configuré : WHATSAPP_ACCESS_TOKEN ou WHATSAPP_PHONE_NUMBER_ID manquant",
+            f"non configuré : {', '.join(manquantes)} manquant(s) "
+            "(WHATSAPP_ENABLED=true mais clés absentes)",
+        )
+
+    if canal == "rcs":
+        # FONDATIONS (Mission 4) : interface abstraite pré-implémentée
+        # (texte + cartes riches en JSON), INACTIVE par défaut. Aucun accès
+        # Google n'existe encore : les variables restent vides, l'état est
+        # explicite, le fallback SMS est DÉCLARATIF (RCS_FALLBACK_SMS).
+        if _variable("RCS_ENABLED").lower() != "true":
+            return EtatCanal(
+                "rcs",
+                False,
+                "non configuré : canal DÉSACTIVÉ — RCS_ENABLED n'est pas à "
+                "true (pré-implémenté : texte + cartes riches, inactif par "
+                "défaut ; fallback SMS déclaratif via RCS_FALLBACK_SMS)",
+            )
+        agent = _variable("RCS_AGENT_ID")
+        url = _variable("RCS_API_URL")
+        cle = _variable("RCS_API_KEY")
+        manquantes = [
+            nom
+            for nom, valeur in (
+                ("RCS_AGENT_ID", agent),
+                ("RCS_API_URL", url),
+                ("RCS_API_KEY", cle),
+            )
+            if not valeur
+        ]
+        if manquantes:
+            return EtatCanal(
+                "rcs",
+                False,
+                f"non configuré : {', '.join(manquantes)} manquant(s) "
+                "(RCS_ENABLED=true mais accès Google absent)",
+            )
+        return EtatCanal(
+            "rcs",
+            True,
+            "configuré (RCS_ENABLED=true, agent et API présents)",
+            {"fallback_sms": "déclaratif" if _variable("RCS_FALLBACK_SMS").lower() == "true" else "non déclaré"},
         )
 
     return EtatCanal(canal, False, f"canal inconnu : {canal}")
@@ -470,13 +576,79 @@ def _envoyer_webpush(destinataire: str, sujet: str, message: str, abonnements=No
     )
 
 
-def _envoyer_whatsapp(destinataire: str, sujet: str, message: str) -> ResultatEnvoi:
-    """Envoi WhatsApp (API Cloud de Meta, message texte)."""
+def _envoyer_whatsapp(
+    destinataire: str,
+    sujet: str,
+    message: str,
+    template: Optional[Dict] = None,
+) -> ResultatEnvoi:
+    """Envoi WhatsApp (API Cloud de Meta) — texte libre ou template structuré.
+
+    RÉFÉRENCE UNIQUE DU CANAL (fondations, Mission 3) : la notification Mia
+    passe par ICI. Le provider historique de la Phase 1
+    (backend/communication/providers/whatsapp_provider.py) est conservé pour
+    le service de communication existant mais n'est plus une deuxième
+    implémentation d'envoi pour Mia — deux implémentations du même canal
+    seraient un défaut silencieux.
+
+    · Template structuré (template = {"nom", "langue", "variables"}) :
+      notification PROACTIVE — Meta impose des templates pré-approuvés
+      (catégorie UTILITY) hors de la fenêtre de 24 h ;
+    · Texte libre : uniquement dans la fenêtre de 24 h après un message du
+      destinataire.
+
+    Le destinataire par défaut est WHATSAPP_NOTIF_DESTINATAIRE (même motif
+    que BREVO_NOTIF_EMAIL pour l'e-mail) : sans lui, le canal répond
+    « non configuré » — un état explicite vaut mieux qu'un échec d'envoi qui
+    ne dit pas sa cause.
+    """
     import requests
 
     jeton = _variable("WHATSAPP_ACCESS_TOKEN")
     numero = _variable("WHATSAPP_PHONE_NUMBER_ID")
-    texte = f"{sujet}\n\n{message}" if sujet else message
+
+    if not destinataire:
+        destinataire = _variable("WHATSAPP_NOTIF_DESTINATAIRE")
+    if not destinataire:
+        return ResultatEnvoi(
+            canal="whatsapp",
+            succes=False,
+            statut="non_configure",
+            destinataire="",
+            code_erreur=None,
+            erreur="aucun destinataire : passez `destinataire` ou définissez "
+                   "WHATSAPP_NOTIF_DESTINATAIRE",
+        )
+
+    if template:
+        # Payload template Meta Cloud API (variables numérotées {{1}}, {{2}}…).
+        charge = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": destinataire.lstrip("+"),
+            "type": "template",
+            "template": {
+                "name": template.get("nom"),
+                "language": {"code": template.get("langue", "fr")},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": str(valeur)}
+                            for valeur in template.get("variables", [])
+                        ],
+                    }
+                ],
+            },
+        }
+    else:
+        texte = f"{sujet}\n\n{message}" if sujet else message
+        charge = {
+            "messaging_product": "whatsapp",
+            "to": destinataire,
+            "type": "text",
+            "text": {"body": texte},
+        }
 
     reponse = requests.post(
         f"https://graph.facebook.com/v21.0/{numero}/messages",
@@ -484,14 +656,7 @@ def _envoyer_whatsapp(destinataire: str, sujet: str, message: str) -> ResultatEn
             "Authorization": f"Bearer {jeton}",
             "Content-Type": "application/json",
         },
-        data=json.dumps(
-            {
-                "messaging_product": "whatsapp",
-                "to": destinataire,
-                "type": "text",
-                "text": {"body": texte},
-            }
-        ).encode("utf-8"),
+        data=json.dumps(charge).encode("utf-8"),
         timeout=DELAI_ENVOI,
     )
 
@@ -529,6 +694,100 @@ def _envoyer_whatsapp(destinataire: str, sujet: str, message: str) -> ResultatEn
     )
 
 
+def _charge_rcs(sujet: str, message: str, cartes: Optional[List[Dict]]) -> Dict:
+    """
+    Structure JSON de message RCS — INTERFACE ABSTRAITE, indépendante du
+    fournisseur final (le choix Google RBM / autre n'est pas fait ; l'URL et
+    l'agent sont configurables). Texte + cartes riches, structure déclarée :
+
+        {"texte": str, "cartes": [{"titre", "sous_titre", "media_url",
+                                   "suggestions": [{"type", "texte", "valeur"}]}]}
+
+    C'est cette structure que l'appelant produit ; l'adaptateur fournisseur
+    (à écrire à l'activation) la traduit au format réel — un seul endroit à
+    toucher, cf. docs/refonte-app-mia/EXTENSIBILITE.md.
+    """
+    return {
+        "texte": f"{sujet}\n\n{message}" if sujet else message,
+        "cartes": list(cartes or []),
+    }
+
+
+def _envoyer_rcs(
+    destinataire: str,
+    sujet: str,
+    message: str,
+    cartes: Optional[List[Dict]] = None,
+) -> ResultatEnvoi:
+    """
+    Envoi RCS (interface abstraite : texte + cartes riches, Mission 4).
+
+    Le canal est INACTIF PAR DÉFAUT (RCS_ENABLED) : `envoyer()` contrôle
+    l'état AVANT d'appeler cette fonction, donc sans clés il n'y a AUCUN
+    appel réseau et AUCUNE exception — le canal répond « non configuré ».
+
+    FALLBACK SMS DÉCLARATIF : si RCS_FALLBACK_SMS=true et que l'envoi
+    échoue, le résultat le NOTE explicitement. La bascule d'envoi effective
+    vers SMS est déclarée dans la structure mais NON implémentée tant que le
+    fournisseur final n'est pas choisi — jamais de réussite annoncée à tort.
+    """
+    import requests
+
+    agent = _variable("RCS_AGENT_ID")
+    url = _variable("RCS_API_URL")
+    cle = _variable("RCS_API_KEY")
+    fallback_declare = _variable("RCS_FALLBACK_SMS").lower() == "true"
+
+    charge = {
+        "agent_id": agent,
+        "destinataire": destinataire,
+        "message": _charge_rcs(sujet, message, cartes),
+    }
+
+    reponse = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {cle}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(charge).encode("utf-8"),
+        timeout=DELAI_ENVOI,
+    )
+
+    if reponse.status_code in (200, 201, 202):
+        identifiant = None
+        try:
+            identifiant = (reponse.json() or {}).get("message_id")
+        except Exception:
+            pass
+        return ResultatEnvoi(
+            canal="rcs",
+            succes=True,
+            statut="envoye",
+            destinataire=destinataire,
+            messages_envoyes=1,
+            identifiant_fournisseur=identifiant,
+        )
+
+    motif = f"HTTP {reponse.status_code}"
+    try:
+        motif = str((reponse.json() or {}).get("error") or motif)
+    except Exception:
+        pass
+    if fallback_declare:
+        motif += " — fallback SMS DÉCLARÉ (RCS_FALLBACK_SMS=true) mais la "
+        motif += "bascule d'envoi n'est pas implémentée tant que le fournisseur "
+        motif += "final n'est pas choisi (cf. EXTENSIBILITE.md)"
+    return ResultatEnvoi(
+        canal="rcs",
+        succes=False,
+        statut="echec",
+        destinataire=destinataire,
+        code_erreur=str(reponse.status_code),
+        erreur=_extrait(motif, 300),
+    )
+
+
 # ============================================================
 # POINT D'ENTRÉE UNIQUE
 # ============================================================
@@ -537,6 +796,7 @@ _ENVOYEURS = {
     "telegram": _envoyer_telegram,
     "email": _envoyer_email,
     "whatsapp": _envoyer_whatsapp,
+    "rcs": _envoyer_rcs,
 }
 
 
@@ -546,12 +806,19 @@ def envoyer(
     sujet: str,
     message: str,
     abonnements=None,
+    template: Optional[Dict] = None,
+    cartes: Optional[List[Dict]] = None,
 ) -> ResultatEnvoi:
     """Envoie une notification sur un canal. NE LÈVE JAMAIS.
 
     Renvoie toujours un `ResultatEnvoi` — succès, échec ou non configuré. La
     route HTTP qui appelle cette fonction n'a donc aucun cas d'erreur à gérer
     et ne peut pas renvoyer 500 à cause d'un fournisseur.
+
+    · `template` (whatsapp) : envoi PROACTIF par template pré-approuvé Meta
+      — produit par template_whatsapp(type_evenement, variables) ;
+    · `cartes` (rcs) : cartes riches en structure JSON déclarative — cf.
+      _charge_rcs.
     """
     debut = time.time()
     canal = (canal or "").strip().lower()
@@ -572,6 +839,8 @@ def envoyer(
         )
 
     # 1. Le canal est-il configuré ? On le dit AVANT d'essayer, avec le motif.
+    #    Pour whatsapp/rcs, « désactivé » (flag OFF) est capté ici : aucun
+    #    appel réseau, aucune exception — l'état dit exactement pourquoi.
     etat = etat_canal(canal)
     if not etat.configure:
         return _finaliser(
@@ -589,6 +858,14 @@ def envoyer(
         if canal == "webpush":
             return _finaliser(
                 _envoyer_webpush(destinataire, sujet, message, abonnements=abonnements)
+            )
+        if canal == "whatsapp":
+            return _finaliser(
+                _envoyer_whatsapp(destinataire, sujet, message, template=template)
+            )
+        if canal == "rcs":
+            return _finaliser(
+                _envoyer_rcs(destinataire, sujet, message, cartes=cartes)
             )
         return _finaliser(_ENVOYEURS[canal](destinataire, sujet, message))
     except Exception as exc:

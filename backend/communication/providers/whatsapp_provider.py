@@ -8,6 +8,17 @@ IMPORTANT:
 - Approbation Meta: 24-48h
 - Les templates ne sont PAS pour la discussion libre, uniquement pour notifications
 
+HÉRITAGE PHASE 1 — note anti-duplication (fondations d'extensibilité, Mission 3)
+--------------------------------------------------------------------------------
+Pour les NOTIFICATIONS MIA (app client), la RÉFÉRENCE du canal WhatsApp est
+`backend/chatbot/notifications.py` (fonction `_envoyer_whatsapp` : envoi texte
+ou template structuré, gate WHATSAPP_ENABLED, trace `chatbot_notification_logs`,
+webhook de statuts POST /api/webhooks/whatsapp). Ce provider conserve sa place
+dans le service de communication Phase 1 (`NotificationService`) : ne pas
+évoluer l'un sans vérifier l'autre — deux implémentations du même canal sont
+un défaut silencieux. Les guides Meta ci-dessous (création de templates)
+restent valides pour les deux.
+
 Documentation Meta:
 https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-message-templates
 """
