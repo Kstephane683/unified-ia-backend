@@ -25,12 +25,15 @@ Versionnement : préfixe /api/client/v1 — toute rupture future ira en v2.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import json
+import os
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -40,21 +43,32 @@ from backend.core.auth import (
     ROLE_CLIENT_OPERATOR,
     ROLE_CLIENT_READER,
     compte_client_authentifie,
+    decode_access_token,
     get_current_user,
     get_password_hash,
     require_site_owner,
     verify_password,
 )
 from backend.core.database import get_db
+from backend.core.fonctionnalites import (
+    HIERARCHIE_PLANS,
+    PLANS_SOUSCRIPTIBLES,
+    PLAN_FREE,
+    exiger_fonctionnalite_site,
+    vue_fonctionnalites,
+)
 from backend.core.models import User
 from backend.chatbot import conversations_service
 from backend.chatbot.competences_noyau import SECTEURS_CORE
 from backend.chatbot.models import (
+    Abonnement,
+    AppAnalytics,
     ChatbotConversation,
     ChatbotLead,
     ChatbotMessage,
     ChatbotSite,
     ClientNotification,
+    Fonctionnalite,
 )
 from backend.chatbot.declencheurs import (
     DEFAUTS_REGLAGES,
@@ -201,6 +215,75 @@ class ReglagesSiteRequest(BaseModel):
     )
 
 
+class SouscriptionRequest(BaseModel):
+    """Demande d'abonnement (fournisseur Jeko, Mission 1.6)."""
+
+    plan: str = Field(
+        ...,
+        min_length=2,
+        max_length=20,
+        description="premium | pro — le plan free est le défaut de tout "
+                    "compte, il ne se souscrit pas",
+    )
+
+
+class EvenementTracking(BaseModel):
+    """
+    UN événement de tracking applicatif (Mission 2). `event_id` est produit
+    PAR L'APP (UUID) : c'est la clé de déduplication — un rejeu exact est
+    ignoré silencieusement. `date_evenement` est l'horodatage CLIENT
+    (local-first : l'app est hors ligne, l'événement est daté quand il se
+    produit, le batch part au retour du réseau).
+    """
+
+    event_id: str = Field(
+        ...,
+        min_length=8,
+        max_length=64,
+        description="UUID produit par l'app — déduplication",
+    )
+    type: str = Field(
+        ...,
+        max_length=50,
+        description="install | app_open | session_start | session_end | "
+                    "screen_view | feature_use | notification_open | "
+                    "upgrade_intent | consent (extensible côté backend)",
+    )
+    date_evenement: datetime = Field(
+        ...,
+        description="Horodatage CLIENT (ISO 8601, local-first)",
+    )
+    site_id: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Facultatif : déduit du compte si l'envoi est authentifié",
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Métadonnées de l'événement (écran vu, fonctionnalité "
+                    "utilisée…). 4 Ko maximum. AUCUNE donnée personnelle du "
+                    "visiteur final du site client",
+    )
+
+
+class BatchTrackingRequest(BaseModel):
+    """Batch d'événements, accepté hors ligne puis envoyé au retour réseau."""
+
+    installation_id: str = Field(
+        ...,
+        min_length=6,
+        max_length=64,
+        description="Identifiant d'installation (avant connexion, sans "
+                    "aucune identité personnelle)",
+    )
+    evenements: List[EvenementTracking] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="1 à 500 événements par requête",
+    )
+
+
 # ============================================================
 # Compte (account-level) — /me, /password, /2fa
 # ============================================================
@@ -214,6 +297,11 @@ async def mon_profil(
     Profil du compte connecté : sites gérés, rôle, état 2FA et
     must_change_password. Reste accessible pendant le changement forcé du mot
     de passe (c'est l'app qui décide de l'écran à afficher grâce à cette route).
+
+    Enrichi (fondations d'extensibilité, Mission 1) : `plan` du compte et
+    fonctionnalités `fonctionnalites_actives` / `fonctionnalites_verrouillees`
+    — l'app découvre TOUTE nouvelle fonctionnalité par cette seule réponse,
+    sans jamais connaître autre chose que les clés de flags.
 
     Aucun nom d'agent, aucune donnée d'un autre site — la liste `sites` ne
     contient que le site du compte.
@@ -245,6 +333,10 @@ async def mon_profil(
             # affiche l'écran de configuration tant qu'elle est inactive.
             "requise": utilisateur.role_client == ROLE_CLIENT_ADMIN,
         },
+        # Fondations d'extensibilité (Mission 1) — au premier niveau du
+        # contrat : `plan`, puis la vue des fonctionnalités (actives = clés ;
+        # verrouillées = {cle, plan_requis, raison}).
+        **vue_fonctionnalites(db, utilisateur),
     }
 
 
@@ -408,6 +500,218 @@ async def desactiver_2fa(
     db.commit()
 
     return {"ok": True, "tfa_active": False}
+
+
+# ============================================================
+# Plans et abonnement (fondations d'extensibilité — Mission 1)
+# ============================================================
+
+@router.get("/plans")
+async def catalogue_plans(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Catalogue des plans (Mission 1.5) — ÉTAT EXPLICITE : « catalogue de
+    démonstration » tant que la tarification et le modèle d'abonnement
+    (mensuel / annuel / usage, noms de plans) ne sont pas décidés par le
+    propriétaire (règle produit : ne jamais vendre ce qui n'existe pas).
+
+    Pour chaque plan : les fonctionnalités couvertes, avec leur état réel
+    (actif / inactif). Auth légère (jeton) : accessible pendant le changement
+    forcé du mot de passe.
+    """
+    lignes = db.query(Fonctionnalite).order_by(Fonctionnalite.cle).all()
+    plans = []
+    for plan in ("free", "premium", "pro"):
+        niveau = HIERARCHIE_PLANS[plan]
+        fonctionnalites = [
+            {
+                "cle": f.cle,
+                "etat": "actif" if f.active else "inactif",
+                "description": f.description,
+            }
+            for f in lignes
+            if HIERARCHIE_PLANS.get(f.plan_minimum, 99) <= niveau
+        ]
+        plans.append({"plan": plan, "niveau": niveau, "fonctionnalites": fonctionnalites})
+    return {
+        "catalogue": "démonstration",
+        "note": "Catalogue de démonstration : la tarification et le modèle "
+                "d'abonnement ne sont pas décidés (décision du propriétaire). "
+                "Aucune fonctionnalité n'est vendue tant qu'elle n'est pas "
+                "branchée.",
+        "plans": plans,
+    }
+
+
+@router.post("/subscribe")
+async def souscrire(
+    corps: SouscriptionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(compte_client_authentifie),
+):
+    """
+    Abstraction de fournisseur Jeko (Mission 1.6) — SANS clés : état explicite
+    + intention enregistrée ; AVEC clés (sandbox) : appel REST au fournisseur.
+
+    Le SEUL endroit où un plan s'élève est le webhook SIGNÉ du fournisseur
+    (POST /api/webhooks/jeko) : cette route n'active jamais un plan elle-même.
+    Toute demande est tracée en audit ; aucune clé n'apparaît nulle part.
+    """
+    import requests  # dépendance dure du projet (utilisée par les canaux)
+
+    plan = (corps.plan or "").strip().lower()
+    if plan == PLAN_FREE:
+        raise HTTPException(
+            status_code=400,
+            detail="Le plan gratuit est le défaut de tout compte : il ne se "
+                   "souscrit pas.",
+        )
+    if plan not in PLANS_SOUSCRIPTIBLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plan inconnu ou non souscriptible : « {plan} ». Plans "
+                   f"souscriptibles : {', '.join(PLANS_SOUSCRIPTIBLES)}.",
+        )
+    if (utilisateur.plan or PLAN_FREE) == plan:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Le compte est déjà sur le plan {plan}.",
+        )
+
+    url_jeko = (os.getenv("JEKO_API_URL") or "").strip()
+    cle_jeko = (os.getenv("JEKO_API_KEY") or "").strip()
+
+    # --- Sans clés : dégradation PROPRE (motif du projet) -------------------
+    # La souscription ne prétend rien : elle répond un état explicite (200)
+    # ET enregistre l'intention en base — aucune demande du propriétaire
+    # n'est perdue, elle sera traitée dès l'activation du fournisseur.
+    if not (url_jeko and cle_jeko):
+        abonnement = Abonnement(
+            user_id=utilisateur.id,
+            plan=plan,
+            statut="intention",
+            fournisseur="jeko",
+        )
+        db.add(abonnement)
+        db.commit()
+        tracer_audit(
+            db,
+            "souscription_intention",
+            user_id=utilisateur.id,
+            user_email=utilisateur.email,
+            site_id=utilisateur.site_id,
+            details={"plan": plan, "fournisseur": "non configuré"},
+            ip=_ip_appelant(request),
+        )
+        db.commit()
+        return {
+            "statut": "non_configure",
+            "raison": "fournisseur d'abonnement Jeko non configuré "
+                      "(JEKO_API_URL / JEKO_API_KEY absents) : rien n'est "
+                      "facturé, l'intention est enregistrée et sera traitée "
+                      "dès l'activation",
+            "abonnement_id": abonnement.id,
+            "plan": plan,
+        }
+
+    # --- Avec clés (sandbox) : appel REST au fournisseur --------------------
+    abonnement = Abonnement(
+        user_id=utilisateur.id,
+        plan=plan,
+        statut="en_attente",
+        fournisseur="jeko",
+    )
+    try:
+        reponse = requests.post(
+            f"{url_jeko.rstrip('/')}/subscriptions",
+            headers={
+                "Authorization": f"Bearer {cle_jeko}",
+                "Content-Type": "application/json",
+            },
+            data=json.dumps(
+                {
+                    "plan": plan,
+                    "email": utilisateur.email,
+                    "reference_interne": f"user:{utilisateur.id}",
+                    "callback_url": "/api/webhooks/jeko",
+                }
+            ).encode("utf-8"),
+            timeout=15,
+        )
+    except Exception as exc:
+        abonnement.statut = "echec_fournisseur"
+        db.add(abonnement)
+        db.commit()
+        tracer_audit(
+            db,
+            "souscription_echec_fournisseur",
+            user_id=utilisateur.id,
+            user_email=utilisateur.email,
+            site_id=utilisateur.site_id,
+            details={"plan": plan, "erreur": type(exc).__name__},
+            ip=_ip_appelant(request),
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail="Fournisseur d'abonnement injoignable : l'intention est "
+                   "enregistrée, réessayez plus tard.",
+        )
+
+    if reponse.status_code in (200, 201, 202):
+        try:
+            donnees_fournisseur = reponse.json() or {}
+        except Exception:
+            donnees_fournisseur = {}
+        reference = str(
+            donnees_fournisseur.get("reference")
+            or donnees_fournisseur.get("id")
+            or ""
+        ).strip()
+        abonnement.reference_fournisseur = reference or None
+        abonnement.statut = "en_attente"
+        db.add(abonnement)
+        db.commit()
+        tracer_audit(
+            db,
+            "souscription_transmise",
+            user_id=utilisateur.id,
+            user_email=utilisateur.email,
+            site_id=utilisateur.site_id,
+            details={"plan": plan, "fournisseur": "jeko"},
+            ip=_ip_appelant(request),
+        )
+        db.commit()
+        return {
+            "statut": "en_attente_paiement",
+            "abonnement_id": abonnement.id,
+            "reference_fournisseur": reference or None,
+            "plan": plan,
+            "message": "Souscription transmise au fournisseur : le webhook "
+                       "signé confirmera l'activation du plan.",
+        }
+
+    abonnement.statut = "echec_fournisseur"
+    db.add(abonnement)
+    db.commit()
+    tracer_audit(
+        db,
+        "souscription_echec_fournisseur",
+        user_id=utilisateur.id,
+        user_email=utilisateur.email,
+        site_id=utilisateur.site_id,
+        details={"plan": plan, "code": str(reponse.status_code)},
+        ip=_ip_appelant(request),
+    )
+    db.commit()
+    raise HTTPException(
+        status_code=502,
+        detail=f"Fournisseur d'abonnement : HTTP {reponse.status_code} — "
+               "l'intention est enregistrée.",
+    )
 
 
 # ============================================================
@@ -688,6 +992,310 @@ async def analytics_du_site(
     from backend.api.routes.chatbot import get_site_analytics
 
     return await get_site_analytics(site_id=site_id, period_days=period_days, db=db)
+
+
+@router.get("/sites/{site_id}/analytics/export")
+async def exporter_analytics_site(
+    site_id: str,
+    period_days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    _verrou: None = Depends(
+        exiger_fonctionnalite_site("analytics_export", ROLE_CLIENT_READER)
+    ),
+):
+    """
+    Export des analytics du site — EXEMPLE END-TO-END du verrou par
+    fonctionnalité (Mission 5.1) : le flag `analytics_export` est en seed,
+    la route est marquée `exiger_fonctionnalite_site`, et l'app la voit via
+    /me. Si le flag passe à `active=false` ou au-delà du plan du compte, la
+    réponse est 403 avec la raison EXPLICITE (jamais silencieuse) :
+        {"detail": "fonctionnalité verrouillée", "fonctionnalite": …,
+         "plan_requis": …, "plan_actuel": …, "raison": …}
+
+    L'ISOLATION PASSE D'AVANT LE VERROU (exiger_fonctionnalite_site chaîne
+    require_site_owner) : un compte qui demande un site étranger reçoit 404,
+    jamais la raison du verrou. Réutilise le calcul existant des analytics.
+    """
+    from backend.api.routes.chatbot import get_site_analytics
+
+    donnees = await get_site_analytics(site_id=site_id, period_days=period_days, db=db)
+    return {
+        "export": True,
+        "format": "json",
+        "fonctionnalite": "analytics_export",
+        "genere_le": datetime.utcnow().isoformat(),
+        "donnees": donnees,
+    }
+
+
+# ============================================================
+# Tracking applicatif (fondations d'extensibilité — Mission 2)
+# ============================================================
+# L'usage de l'APP Mia (installations, ouvertures, sessions, écrans,
+# intention d'upgrade, trace de consentement) — PAS les conversations
+# visiteurs (celles-là vivent dans chatbot_analytics). Aucune donnée
+# personnelle de visiteur final : le tracking décrit l'app, pas les
+# discussions.
+
+#: Énumération applicative des types d'événements. EXTENSIBLE : un nouveau
+#: type se déclare ICI (un seul endroit), l'app peut alors l'envoyer et il
+#: apparaît automatiquement dans les agrégats (cf. EXTENSIBILITE.md).
+TYPES_EVENEMENTS_TRACKING = (
+    "install",
+    "app_open",
+    "session_start",
+    "session_end",
+    "screen_view",
+    "feature_use",
+    "notification_open",
+    "upgrade_intent",
+    "consent",
+)
+
+#: Borne de taille des métadonnées d'un événement (le tracking n'est pas un
+#: exutoire de contenu : 4 Ko suffisent à « quel écran, quelle fonction »).
+TAILLE_METADATA_MAX = 4096
+
+
+def utilisateur_facultatif(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """
+    Dépendance du tracking : PUBLIC ou authentifié. Avant connexion,
+    `installation_id` suffit ; avec un jeton valide, l'événement est enrichi
+    du compte (user_id, site_id). Un jeton absent ou invalide est un simple
+    anonymat — JAMAIS une 401 : le tracking ne doit pas casser l'app.
+    """
+    autorisation = request.headers.get("authorization") or ""
+    if not autorisation.lower().startswith("bearer "):
+        return None
+    payload = decode_access_token(autorisation[7:].strip())
+    if not payload or not payload.get("sub"):
+        return None
+    utilisateur = db.query(User).filter(User.email == payload["sub"]).first()
+    if utilisateur is None or not utilisateur.is_active:
+        return None
+    return utilisateur
+
+
+@router.post("/analytics/event")
+async def recevoir_evenements_app(
+    corps: BatchTrackingRequest,
+    db: Session = Depends(get_db),
+    utilisateur: Optional[User] = Depends(utilisateur_facultatif),
+):
+    """
+    Réception en BATCH des événements de tracking applicatif (Mission 2.3).
+
+    · PUBLIC ou authentifié : l'installation_id suffit avant connexion ;
+    · DÉDUPLICATION par `event_id` (UUID produit par l'app, unique en base) :
+      rejouer un batch au retour du réseau est IGNORÉ silencieusement — 200,
+      compteur `doublons_ignores`, aucune ligne de plus ;
+    · horodatage CLIENT (`date_evenement`, local-first) conservé tel quel ;
+      la date de réception serveur est posée par la base ;
+    · rate limité (30 / 60 s par IP — cf. app.py) ; 1 à 500 événements par
+      requête, métadonnées bornées à 4 Ko.
+    """
+    site_compte = utilisateur.site_id if utilisateur is not None else None
+
+    nouvelles: List[AppAnalytics] = []
+    for evenement in corps.evenements:
+        type_evt = (evenement.type or "").strip().lower()
+        if type_evt not in TYPES_EVENEMENTS_TRACKING:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Type d'événement inconnu : « {type_evt} » "
+                       f"(acceptés : {', '.join(TYPES_EVENEMENTS_TRACKING)}). "
+                       "Un nouveau type se déclare côté backend "
+                       "(EXTENSIBILITE.md §tracking).",
+            )
+        if evenement.metadata is not None:
+            if len(json.dumps(evenement.metadata)) > TAILLE_METADATA_MAX:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Métadonnées trop volumineuses pour "
+                           f"{evenement.event_id} : 4 Ko maximum (le tracking "
+                           "n'enregistre pas de contenu).",
+                )
+        nouvelles.append(
+            AppAnalytics(
+                event_id=evenement.event_id.strip(),
+                installation_id=corps.installation_id.strip(),
+                user_id=utilisateur.id if utilisateur is not None else None,
+                site_id=evenement.site_id or site_compte,
+                event_type=type_evt,
+                donnees=evenement.metadata,
+                date_evenement=evenement.date_evenement,
+            )
+        )
+
+    # Déduplication : on écarte ce qui existe DÉJÀ (rejeu de batch).
+    ids = [ligne.event_id for ligne in nouvelles]
+    existants: set = set()
+    if ids:
+        existants = {
+            ligne[0]
+            for ligne in db.query(AppAnalytics.event_id)
+            .filter(AppAnalytics.event_id.in_(ids))
+            .all()
+        }
+    restantes = []
+    doublons = 0
+    for ligne in nouvelles:
+        if ligne.event_id in existants:
+            doublons += 1
+        else:
+            restantes.append(ligne)
+
+    acceptes = 0
+    if restantes:
+        try:
+            db.add_all(restantes)
+            db.commit()
+            acceptes = len(restantes)
+        except IntegrityError:
+            # Course entre deux batchs simultanés : reprise ligne à ligne ;
+            # le perdant est un doublon ignoré, jamais une erreur 500.
+            db.rollback()
+            for ligne in restantes:
+                try:
+                    db.add(ligne)
+                    db.commit()
+                    acceptes += 1
+                except IntegrityError:
+                    db.rollback()
+                    doublons += 1
+
+    return {
+        "ok": True,
+        "recus": len(corps.evenements),
+        "acceptes": acceptes,
+        "doublons_ignores": doublons,
+    }
+
+
+@router.get("/analytics/app")
+async def analytics_application(
+    period_days: int = Query(30, ge=1, le=365),
+    site_id: Optional[str] = Query(None, max_length=100),
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(compte_client_authentifie),
+):
+    """
+    Agrégats du tracking applicatif pour le PROPRIÉTAIRE (Mission 2.4),
+    SCOPÉS à SON site : installations totales et par jour, taux d'ouverture
+    (app_open / installations), sessions moyennes par installation, écrans
+    les plus vus, dernière activité.
+
+    L'ISOLATION EST STRUCTURELLE : un compte client ne peut PAS choisir un
+    autre site (paramètre `site_id` étranger → 404, contrat d'isolation) ;
+    l'agrégat est toujours borné au site du compte. Les périodes sont bornées
+    par la date de réception SERVEUR (confiance), le découpage par jour suit
+    l'horodatage CLIENT (local-first).
+    """
+    from backend.core.auth import HIERARCHIE_CLIENT
+
+    if utilisateur.role == "admin":
+        # ePerformance voit tout, mais un agrégat est toujours scopé à UN
+        # site : l'admin le choisit explicitement.
+        if not site_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Admin ePerformance : indiquez ?site_id=… — l'agrégat "
+                       "est toujours scopé à un site.",
+            )
+    else:
+        if utilisateur.role_client not in HIERARCHIE_CLIENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Compte client non provisioné pour l'application Mia",
+            )
+        if site_id and site_id != utilisateur.site_id:
+            # Isolation multi-tenant : indiscernable d'un site inexistant.
+            raise HTTPException(status_code=404, detail="Site non trouvé")
+        site_id = utilisateur.site_id
+        if not site_id:
+            return {
+                "disponible": False,
+                "raison": "le compte n'est rattaché à aucun site : aucun "
+                          "agrégat d'usage n'est disponible",
+                "installations": {"total": 0, "par_jour": []},
+                "taux_ouverture": 0.0,
+                "sessions_moyennes_par_installation": 0.0,
+                "ecrans_plus_vus": [],
+                "derniere_activite": None,
+                "evenements_par_type": {},
+            }
+
+    depuis = datetime.utcnow() - timedelta(days=period_days)
+    lignes = (
+        db.query(AppAnalytics)
+        .filter(
+            AppAnalytics.site_id == site_id,
+            AppAnalytics.date_reception >= depuis,
+        )
+        .all()
+    )
+
+    installations_actives = {l.installation_id for l in lignes}
+    installs_par_jour: Dict[str, int] = {}
+    installations_ayant_ouvert = set()
+    sessions = 0
+    ecrans: Dict[str, int] = {}
+    evenements_par_type: Dict[str, int] = {}
+    derniere_activite = None
+
+    for ligne in lignes:
+        type_evt = ligne.event_type
+        evenements_par_type[type_evt] = evenements_par_type.get(type_evt, 0) + 1
+        if type_evt == "install":
+            jour = ligne.date_evenement.date().isoformat() if ligne.date_evenement else "?"
+            installs_par_jour[jour] = installs_par_jour.get(jour, 0) + 1
+        if type_evt == "app_open":
+            installations_ayant_ouvert.add(ligne.installation_id)
+        if type_evt == "session_start":
+            sessions += 1
+        if type_evt == "screen_view":
+            ecran = (ligne.donnees or {}).get("ecran")
+            if ecran:
+                ecrans[str(ecran)] = ecrans.get(str(ecran), 0) + 1
+        if ligne.date_reception and (
+            derniere_activite is None or ligne.date_reception > derniere_activite
+        ):
+            derniere_activite = ligne.date_reception
+
+    nb_installations = len(installations_actives)
+    taux_ouverture = (
+        round(len(installations_ayant_ouvert) / nb_installations, 4)
+        if nb_installations
+        else 0.0
+    )
+    sessions_moyennes = (
+        round(sessions / nb_installations, 2) if nb_installations else 0.0
+    )
+
+    return {
+        "site_id": site_id,
+        "periode": {"jours": period_days, "depuis_reception": depuis.isoformat()},
+        "installations": {
+            "total": nb_installations,
+            "par_jour": [
+                {"date": jour, "total": total}
+                for jour, total in sorted(installs_par_jour.items())
+            ],
+        },
+        "taux_ouverture": taux_ouverture,
+        "sessions_moyennes_par_installation": sessions_moyennes,
+        "ecrans_plus_vus": [
+            {"ecran": ecran, "total": total}
+            for ecran, total in sorted(ecrans.items(), key=lambda i: -i[1])[:10]
+        ],
+        "derniere_activite": (
+            derniere_activite.isoformat() if derniere_activite else None
+        ),
+        "evenements_par_type": dict(sorted(evenements_par_type.items())),
+    }
 
 
 @router.get("/sites/{site_id}/leads")
