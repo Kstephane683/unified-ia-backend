@@ -437,6 +437,18 @@ async def send_message(
         # trouvé de pertinent — le widget qui l'ignore ne voit aucune
         # différence avec avant. Il ne contient que des données publiques
         # (slug, titre, URL d'article) ; jamais de nom d'agent.
+        # Le LLM est hors service (crédit, indisponibilité) : le widget
+        # remplace la bulle brute par sa carte de repli WhatsApp. Champ
+        # ADDITIF — incidence du lot C du 24/09, cf. service.process_message.
+        if result.get('ia_indisponible'):
+            metadata["ia_indisponible"] = True
+
+        # Liens directs du site (lot D) : {url, label, phrase} — additif,
+        # absent quand la détection n'a rien trouvé.
+        liens = result.get('liens_site') or []
+        if liens:
+            metadata["liens_site"] = liens
+
         blog = result.get('blog') or {}
         if blog.get('articles'):
             metadata["blog_sources"] = [

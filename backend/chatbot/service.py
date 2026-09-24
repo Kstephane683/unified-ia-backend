@@ -20,6 +20,7 @@ import time
 
 from .intent_detector import IntentDetector
 from .context_builder import ContextBuilder
+from . import liens_site
 from .agent_router import AgentRouter
 from .response_generator import ResponseGenerator
 from .action_executor import ActionExecutor
@@ -377,7 +378,20 @@ class ChatbotService:
                 'context_sources': context.get('sources', []),
                 # Articles du blog réellement fournis au modèle (tâche 6.8).
                 # None si la recherche n'a rien trouvé de pertinent.
-                'blog': blog
+                'blog': blog,
+                # Incidence 2026-09-24 (lot C) : vrai quand TOUS les
+                # fournisseurs LLM ont échoué (crédit épuisé, API hors ligne)
+                # et que la réponse est le texte de repli « système IA
+                # temporairement indisponible ». Champ additif : le widget qui
+                # l'ignore ne voit aucune différence.
+                'ia_indisponible': generation_metadata.get('llm_provider') == 'fallback',
+                # Liens directs du site (lot D) : détection lexicale sans LLM,
+                # URLs absolues du site du tenant, liste vide si rien ne joue.
+                'liens_site': liens_site.liens_pour(
+                    site_url=(context.get('site') or {}).get('site_url'),
+                    message=message,
+                    intent=intent,
+                ),
             }
         
         except Exception as e:

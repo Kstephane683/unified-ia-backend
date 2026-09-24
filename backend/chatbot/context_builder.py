@@ -126,7 +126,7 @@ class ContextBuilder:
             result = self.db.execute(
                 text("""
                     SELECT site_name, system_prompt, welcome_message, 
-                           features_enabled, theme_config, is_active
+                           features_enabled, theme_config, is_active, site_url
                     FROM chatbot_sites
                     WHERE site_id = :site_id AND is_active = true
                     LIMIT 1
@@ -154,7 +154,10 @@ class ContextBuilder:
                     'system_prompt': result[1],
                     'welcome_message': result[2],
                     'features_enabled': features,
-                    'theme_config': theme
+                    'theme_config': theme,
+                    # URL absolue du site du tenant (lot D : liens du chat) —
+                    # absente pour les sites non configurés -> aucun lien produit.
+                    'site_url': result[6],
                 }
             
             return None
