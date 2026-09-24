@@ -59,6 +59,10 @@ from backend.core.fonctionnalites import (
 )
 from backend.core.models import User
 from backend.chatbot import conversations_service
+from backend.chatbot import (
+    connaissances as connaissances_moteur,
+    instructions_sectorielles,
+)
 from backend.chatbot.competences_noyau import SECTEURS_CORE
 from backend.chatbot.models import (
     Abonnement,
@@ -69,6 +73,7 @@ from backend.chatbot.models import (
     ChatbotSite,
     ClientNotification,
     Fonctionnalite,
+    ConnaissanceProprietaire,
 )
 from backend.chatbot.declencheurs import (
     DEFAUTS_REGLAGES,
@@ -1792,4 +1797,226 @@ async def supprimer_conversation_rgpd(
         "conversation_id": conversation_id,
         "messages_supprimes": suppr_messages,
         "leads_supprimes": suppr_leads,
+    }
+
+# ============================================================
+# ENTRAÎNEMENT (F) — connaissances du propriétaire, côté client
+# (lot Phase 4 bis, 25/09 — CHATBOT.1)
+#
+# Même moteur que les routes admin (backend/chatbot/connaissances.py), mais
+# scopé au site DU COMPTE via require_site_owner : le propriétaire ne gère que
+# les siennes, jamais celles d'un autre tenant. Lecture : reader ; écriture :
+# client_admin. L'effet est immédiat : le cache du moteur est reconstruit à
+# chaque écriture, la prochaine réponse de Mia l'utilise.
+# ============================================================
+
+
+def _connaissance_vue(c: ConnaissanceProprietaire) -> dict:
+    return {
+        "id": c.id,
+        "type": c.type,
+        "question": c.question,
+        "reponse": c.reponse,
+        "contenu": (c.contenu or "")[:300] if c.contenu else None,
+        "source_url": c.source_url,
+        "actif": c.actif,
+        "cree_le": c.cree_le.isoformat() if c.cree_le else None,
+        "maj_le": c.maj_le.isoformat() if c.maj_le else None,
+    }
+
+
+class ConnaissanceClientCreation(BaseModel):
+    """Payload d'entraînement côté app propriétaire (contrat §19)."""
+    type: str = Field(pattern="^(qr|texte)$")
+    question: Optional[str] = Field(default=None, max_length=500)
+    reponse: Optional[str] = Field(default=None, max_length=4000)
+    contenu: Optional[str] = Field(default=None, max_length=20000)
+    source_url: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.get("/sites/{site_id}/connaissances")
+async def connaissances_du_site(
+    site_id: str,
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(require_site_owner()),
+):
+    """Les connaissances du site (écran Entraînement) — les actives d'abord."""
+    lignes = (
+        db.query(ConnaissanceProprietaire)
+        .filter(
+            ConnaissanceProprietaire.site_id == site_id,
+            ConnaissanceProprietaire.actif == True,  # noqa: E712 — l'app gère les actives
+        )
+        .order_by(ConnaissanceProprietaire.id.desc())
+        .limit(500)
+        .all()
+    )
+    return {
+        "site_id": site_id,
+        "total": len(lignes),
+        "items": [_connaissance_vue(c) for c in lignes],
+    }
+
+
+@router.post("/sites/{site_id}/connaissances", status_code=201)
+async def creer_connaissance_client(
+    site_id: str,
+    corps: ConnaissanceClientCreation,
+    request: Request,
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(require_site_owner(ROLE_CLIENT_ADMIN)),
+):
+    """Enseigne une Q/R ou un document à Mia (client_admin). Effet immédiat."""
+    if corps.type == "qr" and (
+        not (corps.question or "").strip() or not (corps.reponse or "").strip()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="une connaissance 'qr' exige une question ET une réponse",
+        )
+    if corps.type == "texte" and not (corps.contenu or "").strip():
+        raise HTTPException(
+            status_code=422, detail="une connaissance 'texte' exige un contenu"
+        )
+    item = ConnaissanceProprietaire(
+        site_id=site_id,
+        type=corps.type,
+        question=(corps.question or "").strip() or None,
+        reponse=(corps.reponse or "").strip() or None,
+        contenu=(corps.contenu or "").strip() or None,
+        source_url=(corps.source_url or "").strip() or None,
+        actif=True,
+        cree_par=utilisateur.email,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    connaissances_moteur.invalider(site_id)
+    connaissances_moteur.charger_depuis_db(db, site_id)
+    tracer_audit(
+        db,
+        "creation_connaissance_client",
+        user_id=utilisateur.id,
+        user_email=utilisateur.email,
+        site_id=site_id,
+        details={"type": corps.type, "connaissance_id": item.id},
+        ip=_ip_appelant(request),
+    )
+    db.commit()
+    return _connaissance_vue(item)
+
+
+@router.delete("/sites/{site_id}/connaissances/{connaissance_id}")
+async def archiver_connaissance_client(
+    site_id: str,
+    connaissance_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(require_site_owner(ROLE_CLIENT_ADMIN)),
+):
+    """Archive une connaissance (actif=false) — traçable, jamais effacée."""
+    item = (
+        db.query(ConnaissanceProprietaire)
+        .filter(
+            ConnaissanceProprietaire.id == connaissance_id,
+            ConnaissanceProprietaire.site_id == site_id,
+        )
+        .first()
+    )
+    if item is None:
+        # 404 volontairement identique « inconnu » ou « d'un autre site » :
+        # la route est déjà scopée au site du compte par require_site_owner.
+        raise HTTPException(status_code=404, detail="Connaissance non trouvée")
+    item.actif = False
+    db.commit()
+    connaissances_moteur.invalider(site_id)
+    connaissances_moteur.charger_depuis_db(db, site_id)
+    tracer_audit(
+        db,
+        "archivage_connaissance_client",
+        user_id=utilisateur.id,
+        user_email=utilisateur.email,
+        site_id=site_id,
+        details={"connaissance_id": connaissance_id},
+        ip=_ip_appelant(request),
+    )
+    db.commit()
+    return _connaissance_vue(item)
+
+
+# ============================================================
+# SECTEUR (G) — instructions sectorielles, côté client
+# (lot Phase 4 bis, 25/09 — CHATBOT.1)
+#
+# Le propriétaire déclare le métier de son site ; le bloc d'instructions que
+# Mia reçoit est généré depuis la SOURCE CANONIQUE du noyau
+# (secteurs_canoniques.json — cf. backend/chatbot/instructions_sectorielles.py).
+# L'app ne rédige rien : elle choisit un slug parmi les 12 déclarés.
+# ============================================================
+
+
+@router.get("/sites/{site_id}/secteur")
+async def lire_secteur(
+    site_id: str,
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(require_site_owner()),
+):
+    """Secteur déclaré du site + les instructions sectorielles correspondantes."""
+    site = db.query(ChatbotSite).filter(ChatbotSite.site_id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail="Site non trouvé")
+    secteur = (site.sector or "").strip().lower() or None
+    # L'app n'offre que les secteurs où un bloc d'instructions existe réellement
+    # (12 secteurs clients — blog/email du noyau ne sont pas des sites clients,
+    # décision du 19/09). Déclarer 'blog' produirait un secteur sans effet.
+    canoniques = set(instructions_sectorielles.charger())
+    return {
+        "secteur": secteur,
+        "bloc_instructions": instructions_sectorielles.bloc_instructions(secteur),
+        "secteurs_disponibles": sorted(canoniques) if canoniques else sorted(SECTEURS_CORE),
+    }
+
+
+@router.put("/sites/{site_id}/secteur")
+async def definir_secteur(
+    site_id: str,
+    corps: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    utilisateur: User = Depends(require_site_owner(ROLE_CLIENT_ADMIN)),
+):
+    """Déclare le secteur du site (client_admin). Slug canonique obligatoire."""
+    site = db.query(ChatbotSite).filter(ChatbotSite.site_id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail="Site non trouvé")
+
+    secteur = str((corps or {}).get("secteur") or "").strip().lower()
+    # Garde canonique : le slug doit être un secteur CLIENT (le canonique est
+    # généré depuis sectors.py du noyau — voir generer-secteurs-canoniques.py).
+    canoniques = set(instructions_sectorielles.charger())
+    admis = canoniques or set(SECTEURS_CORE)
+    if secteur and secteur not in admis:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Secteur inconnu : « {secteur} ». Secteurs disponibles : "
+                f"{', '.join(sorted(admis))}."
+            ),
+        )
+    ancien = site.sector
+    site.sector = secteur or None
+    db.commit()
+    tracer_audit(
+        db,
+        "definition_secteur_site",
+        user_id=utilisateur.id,
+        user_email=utilisateur.email,
+        site_id=site_id,
+        details={"ancien": ancien, "nouveau": site.sector},
+        ip=_ip_appelant(request),
+    )
+    db.commit()
+    return {
+        "secteur": site.sector,
+        "bloc_instructions": instructions_sectorielles.bloc_instructions(site.sector),
     }

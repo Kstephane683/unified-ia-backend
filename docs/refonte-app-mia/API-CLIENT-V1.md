@@ -540,3 +540,80 @@ Aucun envoi ne part tant que les flags ne sont pas posés — **aucun changement
 Webhooks WhatsApp (`/api/webhooks/whatsapp`) : `GET` = vérification Meta (`hub.challenge`, jeton `WHATSAPP_WEBHOOK_VERIFY_TOKEN`) ; `POST` = statuts `sent/delivered/read/failed`, signature `X-Hub-Signature-256` validée si `WHATSAPP_APP_SECRET` est posé (403 sinon), chaque statut tracé dans `chatbot_notification_logs` (sujet `statut_fournisseur: …`).
 
 Où poser les clés : Railway → Variables (production) ou `.env` Docker (déjà déclaré à vide). Liste complète des variables nouvelles : `EXTENSIBILITE.md §6`.
+
+---
+
+## 19. Entraînement — connaissances du propriétaire (lot 4 bis, 25/09)
+
+L'app propriétaire gère ce que Mia répond EN PRIORITÉ : questions/réponses
+fréquentes (`type: "qr"`) et documents texte (`type: "texte"`). Même moteur que
+les routes admin, **scopé au site du compte** (`require_site_owner`) — un
+propriétaire ne voit que les siennes. L'effet est immédiat : le cache du moteur
+est reconstruit à chaque écriture, la prochaine réponse de Mia en tient compte.
+
+### 19.1 `GET /api/client/v1/sites/{site_id}/connaissances`
+
+Rôles : `client_reader` et plus. Réponse :
+
+```json
+{
+  "site_id": "…",
+  "total": 2,
+  "items": [
+    { "id": 7, "type": "qr", "question": "Livrez-vous à Abidjan ?",
+      "reponse": "Oui, sous 24 h.", "contenu": null, "source_url": null,
+      "actif": true, "cree_le": "…", "maj_le": "…" }
+  ]
+}
+```
+
+Seules les connaissances ACTIVES sont listées (l'archivage n'est pas une
+suppression : traçabilité RGPD/audit).
+
+### 19.2 `POST /api/client/v1/sites/{site_id}/connaissances`
+
+Rôle : `client_admin` (2FA active obligatoire). Corps : `{ "type": "qr" |
+"texte", "question"?, "reponse"?, "contenu"?, "source_url"? }`.
+
+- `type: "qr"` exige `question` ET `reponse` (422 sinon) ;
+- `type: "texte"` exige `contenu` (422 sinon) ;
+- bornes : question 500, réponse 4 000, contenu 20 000, URL 500 ;
+- 201 → la connaissance créée ; tracé en audit (`creation_connaissance_client`).
+
+### 19.3 `DELETE /api/client/v1/sites/{site_id}/connaissances/{id}`
+
+Rôle : `client_admin`. **Archive** (`actif: false`), ne supprime pas. 404 si
+inconnue ou hors du site (la route est scopée : aucun 403 distinctif). Réponse :
+la connaissance archivée. Audit : `archivage_connaissance_client`.
+
+## 20. Secteur du site — instructions sectorielles (lot 4 bis, 25/09)
+
+Le propriétaire déclare le **métier** de son site ; le bloc d'instructions que
+Mia reçoit en conversation est généré depuis la **source canonique du noyau**
+(`agent-ia-web/eperf_core/sectors.py` via `secteurs_canoniques.json`). L'app ne
+rédige rien : elle choisit un slug parmi les 12 secteurs clients proposés
+(`blog` et `email` du noyau ne sont pas des secteurs clients — décision du
+19/09, audit préalable app Mia).
+
+### 20.1 `GET /api/client/v1/sites/{site_id}/secteur`
+
+Rôles : `client_reader` et plus.
+
+```json
+{
+  "secteur": "restauration",
+  "bloc_instructions": "# SECTEUR DU SITE\n\nTon de conversation : …",
+  "secteurs_disponibles": ["artisan", "beaute", "…"]
+}
+```
+
+`secteur` est `null` tant que rien n'est déclaré ; `bloc_instructions` est
+`null` si le secteur déclaré n'est pas couvert (l'app doit alors proposer la
+sélection). `secteurs_disponibles` liste UNIQUEMENT les slugs qui produisent un
+bloc réel.
+
+### 20.2 `PUT /api/client/v1/sites/{site_id}/secteur`
+
+Rôle : `client_admin`. Corps : `{ "secteur": "immobilier" }` (ou `null` pour
+désactiver). Slug inconnu → 400 avec la liste des slugs admis. Audit :
+`definition_secteur_site` (ancien → nouveau). Réponse : même forme que 20.1.
