@@ -449,6 +449,12 @@ async def send_message(
         if liens:
             metadata["liens_site"] = liens
 
+        # Connaissances du propriétaire utilisées (chantier F) — additif,
+        # booléen : le visiteur ne voit jamais la donnée brute, le tableau de
+        # bord peut mesurer l'effet de l'entraînement.
+        if result.get('connaissances_utilisees'):
+            metadata["connaissances_utilisees"] = True
+
         # Pages du site du tenant citées (chantier E) — additif, publiques.
         pages = result.get('site_pages') or []
         if pages:
