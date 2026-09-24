@@ -619,6 +619,39 @@ class AppAnalytics(Base):
                 f"installation={self.installation_id})>")
 
 
+class ConnaissanceProprietaire(Base):
+    """
+    Mode apprentissage (chantier F du lot du 24/09) : le propriétaire du site
+    ENTRAÎNE son chatbot depuis le dashboard admin — questions/réponses
+    fréquentes et documents texte. Ces données sont LES SIENNES : elles ont
+    priorité sur les pages du site et le blog dans la composition du contexte
+    (service.py — étape 3ter).
+    """
+    __tablename__ = "connaissances_proprietaire"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    site_id = Column(String(100), nullable=False, index=True,
+                     comment='Tenant propriétaire de la connaissance')
+    # 'qr' : question + réponse explicite ; 'texte' : document libre (note,
+    # URL annotée, extrait). Énumération fermée, validée à la route.
+    type = Column(String(10), nullable=False,
+                  comment="'qr' (question/réponse) | 'texte' (document libre)")
+    question = Column(Text, nullable=True, comment="Question d'entraînement (type 'qr')")
+    reponse = Column(Text, nullable=True, comment="Réponse à servir (type 'qr')")
+    contenu = Column(Text, nullable=True, comment='Corps du document (type texte)')
+    source_url = Column(String(500), nullable=True, comment="Origine du document, si URL")
+    actif = Column(Boolean, nullable=False, default=True,
+                   comment='False = archivé sans destruction (traçabilité)')
+    cree_par = Column(String(200), nullable=True, comment='Identifiant admin créateur')
+    cree_le = Column(TIMESTAMP, server_default=func.current_timestamp())
+    maj_le = Column(TIMESTAMP, server_default=func.current_timestamp(),
+                    onupdate=func.current_timestamp())
+
+    def __repr__(self):
+        return (f"<ConnaissanceProprietaire(id={self.id}, site={self.site_id}, "
+                f"type={self.type})>")
+
+
 # Indexes composés pour optimisation des requêtes
 Index('idx_conversations_site_status', ChatbotConversation.site_id, ChatbotConversation.status)
 Index('idx_conversations_site_started', ChatbotConversation.site_id, ChatbotConversation.started_at)

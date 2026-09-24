@@ -25,6 +25,7 @@ from .agent_router import AgentRouter
 from .response_generator import ResponseGenerator
 from .action_executor import ActionExecutor
 from .blog_search import enrichir_contexte
+from . import connaissance_site, connaissances, instructions_sectorielles
 from .models import (
     ChatbotConversation,
     ChatbotMessage,
@@ -215,6 +216,29 @@ class ChatbotService:
             #   · sans résultat jugé pertinent, la clé n'est simplement pas
             #     posée : Mia répond comme avant, sans savoir que la recherche
             #     existe.
+            # 3ter. Connaissances du PROPRIÉTAIRE (chantier F, 24/09) —
+            # priorité maximale : c'est ce qu'il a explicitement enseigné.
+            try:
+                connaissances.charger_depuis_db(self.db, site_id)
+                trouvées = connaissances.chercher(site_id, message)
+                if trouvées:
+                    context['connaissances'] = trouvées
+                    context.setdefault('sources', []).insert(0, 'connaissances')
+            except Exception as _connaissances_erreur:  # pragma: no cover - filet
+                print(f"[F] Connaissances ignorées: {_connaissances_erreur}")
+
+            # 3quater. Pages du SITE du tenant (chantier E, 24/09) — avant le
+            # blog : le contenu du site du client est la première base.
+            try:
+                site_url = (context.get('site') or {}).get('site_url')
+                if site_url:
+                    site_pages = connaissance_site.enrichir_contexte(message, site_url)
+                    if site_pages:
+                        context['site_knowledge'] = site_pages
+                        context.setdefault('sources', []).insert(0, 'site')
+            except Exception as _site_erreur:  # pragma: no cover - filet
+                print(f"[E] Recherche site ignorée: {_site_erreur}")
+
             try:
                 blog = enrichir_contexte(message)
                 if blog:
@@ -392,6 +416,11 @@ class ChatbotService:
                     message=message,
                     intent=intent,
                 ),
+                # Sources de connaissance utilisées (E/F) : pages du site du
+                # tenant citées dans la réponse — publiques, l'affichage côté
+                # widget est un simple lien.
+                'site_pages': (context.get('site_knowledge') or {}).get('pages') or [],
+                'connaissances_utilisees': bool(context.get('connaissances')),
             }
         
         except Exception as e:

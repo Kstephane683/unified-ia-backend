@@ -449,6 +449,13 @@ async def send_message(
         if liens:
             metadata["liens_site"] = liens
 
+        # Pages du site du tenant citées (chantier E) — additif, publiques.
+        pages = result.get('site_pages') or []
+        if pages:
+            metadata["site_pages"] = [
+                {"url": p.get("url"), "titre": p.get("titre")} for p in pages
+            ]
+
         blog = result.get('blog') or {}
         if blog.get('articles'):
             metadata["blog_sources"] = [

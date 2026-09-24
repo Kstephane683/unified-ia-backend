@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.core.auth import get_current_user, get_password_hash
+from backend.chatbot import connaissances as connaissances_moteur
+from backend.chatbot.models import ConnaissanceProprietaire
 from backend.core.database import get_db
 from backend.core.models import User
 from backend.chatbot.models import (
@@ -1129,3 +1131,108 @@ async def enregistrer_abonnement_push(
         },
         "canal": etat.pour_api(),
     }
+
+
+# ============================================================
+# MODE APPRENTISSAGE — connaissances du propriétaire (chantier F, 24/09)
+# ============================================================
+
+
+class ConnaissanceCreation(BaseModel):
+    """Payload de création/édition d'une connaissance."""
+    site_id: str = Field(min_length=1, max_length=100)
+    type: str = Field(pattern="^(qr|texte)$")
+    question: Optional[str] = Field(default=None, max_length=500)
+    reponse: Optional[str] = Field(default=None, max_length=4000)
+    contenu: Optional[str] = Field(default=None, max_length=20000)
+    source_url: Optional[str] = Field(default=None, max_length=500)
+
+
+def _connaissance_pour_api(c: ConnaissanceProprietaire) -> dict:
+    return {
+        "id": c.id,
+        "site_id": c.site_id,
+        "type": c.type,
+        "question": c.question,
+        "reponse": c.reponse,
+        "contenu": (c.contenu or "")[:300] if c.contenu else None,
+        "source_url": c.source_url,
+        "actif": c.actif,
+        "cree_le": c.cree_le.isoformat() if c.cree_le else None,
+        "maj_le": c.maj_le.isoformat() if c.maj_le else None,
+    }
+
+
+@router.get("/admin/connaissances")
+async def lister_connaissances(
+    site_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Les connaissances d'un site (Q/R + documents), les récentes d'abord."""
+    require_admin(current_user)
+    lignes = (
+        db.query(ConnaissanceProprietaire)
+        .filter(ConnaissanceProprietaire.site_id == site_id)
+        .order_by(ConnaissanceProprietaire.id.desc())
+        .limit(500)
+        .all()
+    )
+    return {"site_id": site_id, "total": len(lignes), "items": [_connaissance_pour_api(c) for c in lignes]}
+
+
+@router.post("/admin/connaissances", status_code=201)
+async def creer_connaissance(
+    payload: ConnaissanceCreation,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Ajoute une Q/R ou un document au corpus d'entraînement du site."""
+    require_admin(current_user)
+    if payload.type == "qr" and (not (payload.question or "").strip() or not (payload.reponse or "").strip()):
+        raise HTTPException(status_code=422, detail="une connaissance 'qr' exige question ET réponse")
+    if payload.type == "texte" and not (payload.contenu or "").strip():
+        raise HTTPException(status_code=422, detail="une connaissance 'texte' exige un contenu")
+    item = ConnaissanceProprietaire(
+        site_id=payload.site_id,
+        type=payload.type,
+        question=(payload.question or "").strip() or None,
+        reponse=(payload.reponse or "").strip() or None,
+        contenu=(payload.contenu or "").strip() or None,
+        source_url=(payload.source_url or "").strip() or None,
+        actif=True,
+        cree_par=str(current_user.get("email") or current_user.get("sub") or "admin"),
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    # L'effet est IMMÉDIAT : l'index mémoire du site est reconstruit ici.
+    connaissances_moteur.invalider(payload.site_id)
+    connaissances_moteur.charger_depuis_db(db, payload.site_id)
+    return _connaissance_pour_api(item)
+
+
+@router.delete("/admin/connaissances/{connaissance_id}")
+async def supprimer_connaissance(
+    connaissance_id: int,
+    site_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Archive une connaissance (actif=false) : traçable, jamais effacé en silence."""
+    require_admin(current_user)
+    item = (
+        db.query(ConnaissanceProprietaire)
+        .filter(
+            ConnaissanceProprietaire.id == connaissance_id,
+            ConnaissanceProprietaire.site_id == site_id,
+        )
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="connaissance inconnue pour ce site")
+    item.actif = False
+    db.commit()
+    connaissances_moteur.invalider(site_id)
+    connaissances_moteur.charger_depuis_db(db, site_id)
+    return _connaissance_pour_api(item)
