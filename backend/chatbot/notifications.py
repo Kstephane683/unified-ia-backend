@@ -361,11 +361,39 @@ def _extrait(texte: str, longueur: int = TRACE_CORPS_MAX) -> str:
 
 
 def _envoyer_telegram(destinataire: str, sujet: str, message: str) -> ResultatEnvoi:
-    """Envoi Telegram (API Bot, HTTP JSON). Vérifié en fonctionnement."""
+    """Envoi Telegram (API Bot, HTTP JSON). Vérifié en fonctionnement.
+
+    Garde-fou (incident 2026-09-22) : le bot n'écrit qu'aux chat_id listés
+    dans TELEGRAM_ADMIN_CHAT_ID (plusieurs valeurs séparées par des virgules).
+    Tout autre destinataire est refusé AVANT l'appel réseau : un token compromis
+    ou une route admin trompée ne doit pas pouvoir transformer le bot en relais
+    vers des chats inconnus. Pour un usage multi-tenant à venir, poser
+    TELEGRAM_ALLOW_ANY_CHAT_ID=true (variable explicite, jamais un défaut).
+    """
     import requests  # dépendance du projet, pas optionnelle
 
     jeton = _variable("TELEGRAM_BOT_TOKEN")
-    cible = destinataire or _variable("TELEGRAM_ADMIN_CHAT_ID")
+    admin = _variable("TELEGRAM_ADMIN_CHAT_ID")
+    cible = str(destinataire or admin or "").strip()
+    whitelist = [x.strip() for x in str(admin or "").split(",") if x.strip()]
+    if (
+        whitelist
+        and cible
+        and cible not in whitelist
+        and _variable("TELEGRAM_ALLOW_ANY_CHAT_ID") != "true"
+    ):
+        return ResultatEnvoi(
+            canal="telegram",
+            succes=False,
+            statut="refuse_whitelist",
+            destinataire=cible,
+            code_erreur="whitelist",
+            erreur=(
+                "destinataire absent de TELEGRAM_ADMIN_CHAT_ID — envoi refusé "
+                "(garde-fou incident 2026-09-22 ; outrepasser exige "
+                "TELEGRAM_ALLOW_ANY_CHAT_ID=true)"
+            ),
+        )
     texte = f"{sujet}\n\n{message}" if sujet else message
 
     reponse = requests.post(

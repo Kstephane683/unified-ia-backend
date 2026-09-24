@@ -282,6 +282,55 @@ class TestEchecDEnvoi:
         notifications.tracer(base, resultat, sujet="Sujet", message="Message")
         assert base.query(ChatbotNotificationLog).filter_by(statut="echec").count() == 1
 
+    def test_whitelist_refuse_un_chat_etranger_avant_tout_appel(self, telegram_configure, monkeypatch):
+        """Incident 2026-09-22 : le bot n'écrit qu'aux chat_id admin — un
+        destinataire étranger est refusé AVANT l'appel réseau, jamais un
+        message n'en part."""
+        appels = []
+
+        def espion(*a, **k):
+            appels.append(a)
+            return FausseReponse(200, {"ok": True, "result": {"message_id": 1}})
+
+        monkeypatch.setattr("requests.post", espion)
+        resultat = notifications.envoyer("telegram", "111222333", "Sujet", "Message")
+
+        assert resultat.succes is False
+        assert resultat.statut == "refuse_whitelist"
+        assert resultat.code_erreur == "whitelist"
+        assert "TELEGRAM_ADMIN_CHAT_ID" in resultat.erreur
+        assert appels == []  # aucun appel réseau n'a été tenté
+
+    def test_whitelist_laisse_passer_le_chat_admin(self, telegram_configure, monkeypatch):
+        monkeypatch.setattr(
+            "requests.post",
+            lambda *a, **k: FausseReponse(200, {"ok": True, "result": {"message_id": 7}}),
+        )
+        resultat = notifications.envoyer("telegram", "", "Sujet", "Message")
+
+        assert resultat.succes is True
+        assert resultat.statut == "envoye"
+
+    def test_whitelist_accepte_plusieurs_chat_id_separes_par_virgules(self, telegram_configure, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_ADMIN_CHAT_ID", "987654321,111222333")
+        monkeypatch.setattr(
+            "requests.post",
+            lambda *a, **k: FausseReponse(200, {"ok": True, "result": {"message_id": 8}}),
+        )
+        resultat = notifications.envoyer("telegram", "111222333", "Sujet", "Message")
+
+        assert resultat.succes is True
+
+    def test_whitelist_est_outrepassable_uniquement_par_variable_explicite(self, telegram_configure, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_ALLOW_ANY_CHAT_ID", "true")
+        monkeypatch.setattr(
+            "requests.post",
+            lambda *a, **k: FausseReponse(200, {"ok": True, "result": {"message_id": 9}}),
+        )
+        resultat = notifications.envoyer("telegram", "111222333", "Sujet", "Message")
+
+        assert resultat.succes is True
+
     def test_erreur_reseau_est_absorbee(self, telegram_configure, monkeypatch):
         """Une exception de la bibliothèque HTTP ne doit pas remonter."""
 
